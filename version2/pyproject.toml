@@ -1,0 +1,45 @@
+[build-system]
+build-backend = "poetry.core.masonry.api"
+
+requires = [ "poetry-core>=2,<3" ]
+
+[project]
+name = "dota-picker"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+authors = [
+  { name = "Oleksii Kutsenko", email = "kutsenko.new@gmail.com" },
+]
+requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+]
+
+[dependency-groups]
+dev = [
+  "pylint>=3.3.8,<4",
+  "ruff>=0.13.2,<0.14",
+]
+
+[tool.poetry]
+package-mode = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 79
+format.indent-style = "space"
+format.quote-style = "double"
+lint.select = [
+  "ALL",
+]
+lint.ignore = [
+  "ANN001",
+  "ANN201",
+  "D103",
+  "G004",
+]

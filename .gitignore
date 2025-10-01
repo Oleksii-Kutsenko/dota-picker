@@ -1,0 +1,7 @@
+.ignore
+.ipynb_checkpoints
+.ropeproject
+venv
+.streamlit
+.ruff_cache
+__pycache__
