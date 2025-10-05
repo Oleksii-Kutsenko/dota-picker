@@ -1,7 +1,6 @@
 import importlib
 import logging
 import sys
-from sys import exc_info
 
 import click
 
@@ -15,8 +14,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class DotaPickerException(Exception):
-    pass
+class DotaPickerError(Exception):
+    """Main applicaiton exception."""
 
 
 @click.group()
@@ -32,8 +31,8 @@ def calculate_matchups():
             settings.PUBLIC_DOTA_MATCHES_PATH,
             settings.MATCHUPS_STATISTICS_PATH,
         )
-    except DotaPickerException as critical_error:
-        logger.error("Critical Error", exc_info=True)
+    except DotaPickerError as critical_error:
+        logger.exception("Critical Error")
         click.echo(f"Error: {critical_error}")
 
 
@@ -41,35 +40,34 @@ def calculate_matchups():
 def load_public_matches():
     try:
         module = importlib.import_module(
-            "dota_hero_picker.load_public_matches"
+            "dota_hero_picker.load_public_matches",
         )
         module.main(settings.ACCOUNT_ID, settings.PUBLIC_DOTA_MATCHES_PATH)
-    except DotaPickerException as critical_error:
-        logger.error("Critical Error", exc_info=True)
+    except DotaPickerError as critical_error:
+        logger.exception("Critical Error")
         click.echo(f"Error: {critical_error}")
 
 
 @cli.command()
-def train_model():
+def train_model() -> None:
     try:
         module = importlib.import_module("dota_hero_picker.train_model")
         module.main(
             settings.PERSONAL_DOTA_MATCHES_PATH,
-            settings.MATCHUPS_STATISTICS_PATH,
         )
-    except DotaPickerException as critical_error:
-        logger.error("Critical Error", exc_info=True)
+    except DotaPickerError as critical_error:
+        logger.exception("Critical Error")
         click.echo(f"Error: {critical_error}")
 
 
 @cli.command()
-def load_personal_matches():
+def load_personal_matches() -> None:
     try:
         module = importlib.import_module(
             "dota_hero_picker.load_personal_matches",
         )
         module.main(settings.PERSONAL_DOTA_MATCHES_PATH, settings.ACCOUNT_ID)
-    except DotaPickerException as critical_error:
+    except DotaPickerError as critical_error:
         logger.exception("Critical Error")
         click.echo(f"Error: {critical_error}")
 

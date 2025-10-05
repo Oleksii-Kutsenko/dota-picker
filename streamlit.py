@@ -4,13 +4,11 @@ import torch
 
 import settings
 import streamlit as st
+from dota_hero_picker.data_preparation import create_input_vector
 from dota_hero_picker.load_personal_matches import get_hero_data
 from dota_hero_picker.neural_network import HeroPredictorWithEmbedding
 from dota_hero_picker.train_model import (
-    create_input_vector,
     embedding_dim,
-    num_counter_pairs,
-    num_synergy_pairs,
 )
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -155,7 +153,7 @@ def suggest_best_picks(
     model: HeroPredictorWithEmbedding,
     team_picks: list[str],
     opponent_picks: list[str],
-    allowed_positions: list[str],
+    allowed_positions: list[int],
     top_n: int = 50,
 ) -> list[tuple[str, float]]:
     model.eval()
@@ -293,7 +291,7 @@ position_to_name = {
     4: "Roaming Support",
     5: "Hard Support",
 }
-selected_positions = st.sidebar.multiselect(
+selected_positions: list[int] = st.sidebar.multiselect(
     "Allowed Positions (select none for all)",
     options=position_options,
     format_func=lambda p: f"{p} ({position_to_name[p]})",

@@ -1,16 +1,14 @@
-import argparse
 import logging
 import os
 import sys
 from collections import Counter
-from itertools import combinations
 from pathlib import Path
+from typing import Self
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.init as init
 import torch.optim as optim
 from sklearn.base import BaseEstimator
 from sklearn.metrics import (
@@ -19,21 +17,14 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import ParameterGrid, StratifiedShuffleSplit
+from sklearn.model_selection import ParameterGrid
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 
 import settings
 
 from .data_preparation import (
-    create_input_vector,
-    hero_data,
-    hero_to_id,
-    heroes,
-    id_to_hero,
-    num_counter_pairs,
     num_heroes,
-    num_synergy_pairs,
     prepare_training_data,
 )
 from .neural_network import (
@@ -54,7 +45,12 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class PyTorchEstimator(BaseEstimator):
     def __init__(
-        self, input_size, epochs=10, lr=0.001, batch_size=32, patience=3
+        self,
+        input_size: int,
+        epochs: int = 10,
+        lr: float = 0.001,
+        batch_size: int = 32,
+        patience: int = 3,
     ):
         self.input_size = input_size
         self.epochs = epochs
@@ -63,7 +59,7 @@ class PyTorchEstimator(BaseEstimator):
         self.patience = patience
         self.model = None
 
-    def fit(self, X, y):
+    def fit(self, X: list, y: list) -> Self:
         self.model = HeroPredictorWithOrder(self.input_size)
         self.model = train_model(
             self.model,
@@ -76,7 +72,7 @@ class PyTorchEstimator(BaseEstimator):
         )
         return self
 
-    def predict(self, X):
+    def predict(self, X: list) -> np.array:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.eval()
         with torch.no_grad():
@@ -89,8 +85,7 @@ class PyTorchEstimator(BaseEstimator):
         return accuracy_score(y, preds)
 
 
-def load_decisions_from_csv(csv_file_path):
-    decisions = []
+def load_decisions_from_csv(csv_file_path: str) -> pd.DataFrame:
     if not os.path.exists(csv_file_path):
         raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
     decisions_dataframe = pd.read_csv(
@@ -104,36 +99,18 @@ def load_decisions_from_csv(csv_file_path):
         },
         dtype={"win": int},
     )
-
-    for index, row in decisions_dataframe.iterrows():
-        full_team_picks = row["full_team_picks"].strip().split(",")
-        team_picks = row["team_picks"].strip().split(",")
-        full_opponent_picks = row["full_opponent_picks"].strip().split(",")
-        opponent_picks = row["opponent_picks"].strip().split(",")
-        picked_hero = row["picked_hero"]
-        win = row["win"]
-
-        all_picks = team_picks + opponent_picks + [picked_hero]
-        invalid_heroes = [
-            hero for hero in all_picks if hero and hero not in hero_to_id
-        ]
-        if invalid_heroes:
-            raise RuntimeError(f"Invalid Heroes: {invalid_heroes}")
-
-        decisions.append(
-            (
-                full_team_picks,
-                team_picks,
-                full_opponent_picks,
-                opponent_picks,
-                picked_hero,
-                win,
-            )
+    to_split_columns = [
+        "full_team_picks",
+        "team_picks",
+        "full_opponent_picks",
+        "opponent_picks",
+    ]
+    for column in to_split_columns:
+        decisions_dataframe[column] = (
+            decisions_dataframe[column].str.strip().str.split(",")
         )
 
-    if not decisions:
-        raise ValueError("No valid decisions found in the CSV file")
-    return decisions
+    return decisions_dataframe
 
 
 class DotaDataset(Dataset):
@@ -207,16 +184,16 @@ def get_data_loader(x_data, y_data, batch_size, shuffle=True):
 
 
 def train_model(
-    model,
-    x_train,
-    y_train,
-    epochs,
-    lr,
-    batch_size,
-    pos_weight,
-    patience=3,
-    x_val=None,
-    y_val=None,
+    model: HeroPredictorWithEmbedding,
+    x_train: list,
+    y_train: list,
+    epochs: int,
+    lr: float,
+    batch_size: int,
+    pos_weight: torch.Tensor,
+    patience: int = 3,
+    x_val: list | None = None,
+    y_val: list | None = None,
 ):
     model.to(device)
 
@@ -351,7 +328,9 @@ def evaluate_model(model, loader, criterion):
     return avg_val_loss, acc, prec, rec, f1
 
 
-def compute_baseline_f1(y_train, y_val):
+def compute_baseline_f1(
+    y_train: list[str], y_val: list[str]
+) -> tuple[float, int, float, float]:
     # Determine majority class from training data
     counter = Counter(y_train)
     majority_class = counter.most_common(1)[0][0]
@@ -370,7 +349,9 @@ def compute_baseline_f1(y_train, y_val):
     return baseline_f1, majority_class, train_dist, val_dist
 
 
-def optimize_hyperparameters(x_train, y_train, x_val, y_val, input_size):
+def optimize_hyperparameters(
+    x_train: list, y_train: list, x_val: list, y_val: list
+):
     param_grid = {
         "epochs": [10, 20, 30],
         "lr": [0.001, 0.01, 0.1],
@@ -384,7 +365,7 @@ def optimize_hyperparameters(x_train, y_train, x_val, y_val, input_size):
 
     for params in ParameterGrid(param_grid):
         logger.info(f"Testing params: {params}")
-        estimator = PyTorchEstimator(input_size=input_size, **params)
+        estimator = PyTorchEstimator(**params)
         estimator.fit(x_train, y_train)
         val_pred = estimator.predict(x_val)
         val_f1 = f1_score(y_val, val_pred)
@@ -399,81 +380,73 @@ def optimize_hyperparameters(x_train, y_train, x_val, y_val, input_size):
     return best_model
 
 
-def main(csv_file_path, matchups_statistics_path):
+def main(csv_file_path: str) -> None:
     optimize = False
     epochs = 30
     lr = 0.0002
     batch_size = 32
     patience = 3
 
-    try:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        decisions = load_decisions_from_csv(csv_file_path)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    decision_dataframe = load_decisions_from_csv(csv_file_path)
 
-        num_of_positives = len(
-            [1 for decision in decisions if decision[5] == 1]
-        )
-        num_of_negatives = len(decisions) - num_of_positives
-        pos_weight = torch.tensor([num_of_negatives / num_of_positives]).to(
-            device
-        )
-        logger.info("Class distribution for original data")
-        logger.info(f"Number of Wins {num_of_positives}")
-        logger.info(f"Number of Loses {num_of_negatives}")
-        logger.info(f"Pos Weight {pos_weight}")
+    num_of_positives = len(decision_dataframe[decision_dataframe["win"] == 1])
+    num_of_negatives = len(decision_dataframe) - num_of_positives
+    pos_weight = torch.tensor([num_of_negatives / num_of_positives]).to(device)
+    logger.info("Class distribution for original data")
+    logger.info(f"Number of Wins {num_of_positives}")
+    logger.info(f"Number of Loses {num_of_negatives}")
+    logger.info(f"Pos Weight {pos_weight}")
 
-        X_train, X_val, y_train, y_val = prepare_training_data(decisions)
+    x_train, x_val, y_train, y_val = prepare_training_data(decision_dataframe)
+    logger.info(
+        f"Loaded {len(decision_dataframe)} decisions "
+        f"(Train: {len(x_train)}, Val: {len(x_val)}).",
+    )
+
+    # Compute and print baseline F1-score
+    baseline_f1, majority_class, train_dist, val_dist = compute_baseline_f1(
+        y_train, y_val
+    )
+    logger.info(
+        "Baseline F1-score "
+        f"(always predict majority class {majority_class}): "
+        f"{baseline_f1:.4f}",
+    )
+    logger.info("Training class distribution: %s", train_dist)
+    logger.info("Validation class distribution: %s", val_dist)
+
+    model = HeroPredictorWithEmbedding(num_heroes, embedding_dim)
+
+    if optimize:
+        model = optimize_hyperparameters(
+            x_train,
+            y_train,
+            x_val,
+            y_val,
+        )
+        torch.save(model.state_dict(), "optimized_model.pth")
         logger.info(
-            f"Loaded {len(decisions)} decisions "
-            f"(Train: {len(X_train)}, Val: {len(X_val)}).",
+            "Hyperparameter optimization complete! "
+            "Model saved as 'optimized_model.pth'.",
         )
-
-        # Compute and print baseline F1-score
-        baseline_f1, majority_class, train_dist, val_dist = (
-            compute_baseline_f1(y_train, y_val)
+    else:
+        model = train_model(
+            model,
+            x_train,
+            y_train,
+            epochs,
+            lr,
+            batch_size,
+            pos_weight,
+            patience,
+            x_val,
+            y_val,
+        )
+        torch.save(
+            model.state_dict(),
+            settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
         )
         logger.info(
-            "Baseline F1-score "
-            f"(always predict majority class {majority_class}): "
-            f"{baseline_f1:.4f}",
+            "Training complete! Model saved as 'trained_model.pth'.",
         )
-        logger.info("Training class distribution: %s", train_dist)
-        logger.info("Validation class distribution: %s", val_dist)
-
-        model = HeroPredictorWithEmbedding(num_heroes, embedding_dim)
-
-        if optimize:
-            model = optimize_hyperparameters(
-                X_train,
-                y_train,
-                X_val,
-                y_val,
-                input_size,
-            )
-            torch.save(model.state_dict(), "optimized_model.pth")
-            logger.info(
-                "Hyperparameter optimization complete! "
-                "Model saved as 'optimized_model.pth'.",
-            )
-        else:
-            model = train_model(
-                model,
-                X_train,
-                y_train,
-                epochs,
-                lr,
-                batch_size,
-                pos_weight,
-                patience,
-                X_val,
-                y_val,
-            )
-            torch.save(
-                model.state_dict(),
-                settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
-            )
-            logger.info(
-                "Training complete! Model saved as 'trained_model.pth'.",
-            )
-    except Exception:
-        logger.exception("Critical error during training")

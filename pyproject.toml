@@ -54,6 +54,7 @@ lint.ignore = [
   "ANN201",
   "D100",
   "D103",
+  "D212",
   "G004",
 ]
 
@@ -131,7 +132,7 @@ limit-inference-results = 100
 
 # List of plugins (as comma separated values of python module names) to load,
 # usually to register additional checkers.
-# load-plugins =
+load-plugins = [ "pylint.extensions.docparams", "pylint.extensions.docstyle" ]
 
 # Pickle collected data for later comparisons.
 persistent = true
@@ -440,6 +441,7 @@ disable = [
   "use-implicit-booleaness-not-comparison-to-zero",
   "use-symbolic-message-instead",
   "missing-module-docstring",
+  "logging-fstring-interpolation",
 ]
 
 # Enable the message, report, category or checker with the given id(s). You can

@@ -51,7 +51,7 @@ class HeroPredictorWithEmbedding(nn.Module):
 
         self._initialize_weights()
 
-    def _initialize_weights(self):
+    def _initialize_weights(self) -> None:
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
@@ -152,7 +152,7 @@ class HeroPredictorWithOrder(nn.Module):
 
         self._initialize_weights()
 
-    def _initialize_weights(self):
+    def _initialize_weights(self) -> None:
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
@@ -207,7 +207,7 @@ class DeepSeekHeroPredictor(nn.Module):
 
         self._initialize_weights()
 
-    def _initialize_weights(self):
+    def _initialize_weights(self) -> None:
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")

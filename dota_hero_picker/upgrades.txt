@@ -1,9 +1,9 @@
-    Training script probably can be optimized - investigate
-    Optimize hyperparameters: Use Optuna to tune model hyperparameters (e.g., learning rate, embedding dimensions, FM latent factors) with a focus on personalization metrics, running trials on your validation set for 50-100 iterations.
-
+Remove synergies and counters pre-computing. Add patch embedding.
+Incorporate hero roles into input vectors: Extract hero roles (e.g., Carry, Midlaner, Offlaner, Support) from OpenDota's heroes.json API and add them as one-hot encoded features or embeddings concatenated to each hero's slot in the input vector (team_vec, opponent_vec, pick_vec). Good idea go through skills and check Stuns, Root, Silence, Slow, Hex, Taunt, Sleep, AoE skills, pure damage, has break, has dispel, provide vision, is invisible, and so on. STR, IS_Melee
+Optimize hyperparameters: Use Optuna to tune model hyperparameters (e.g., learning rate, embedding dimensions, FM latent factors) with a focus on personalization metrics, running trials on your validation set for 50-100 iterations.
+Training script probably can be optimized - investigate
     Add personalized hero attributes: For each hero in the draft, compute and concatenate user-specific features like historical win rate, play frequency, average damage dealt, and deaths from your past games, sourced from OpenDota or personal data; normalize these values for model stability.
 
-    Incorporate hero roles into input vectors: Extract hero roles (e.g., Carry, Midlaner, Offlaner, Support) from OpenDota's heroes.json API and add them as one-hot encoded features or embeddings concatenated to each hero's slot in the input vector (team_vec, opponent_vec, pick_vec).
 
 
 

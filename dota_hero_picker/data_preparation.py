@@ -213,6 +213,7 @@ def create_input_vector(
     team_syn_pairs, opp_syn_pairs, team_cnt_pairs = create_pairwise_indices(
         team_picks, opponent_picks
     )
+    breakpoint()
     aggregate_features = create_aggregate_features(team_picks, opponent_picks)
     return (
         team_vec,
@@ -320,32 +321,28 @@ def stratified_split(
     return train_indices, val_indices
 
 
-def prepare_training_data(decisions, test_size=0.2):
+def prepare_training_data(
+    decisions: pd.DataFrame,
+    test_size: float = 0.2,
+) -> tuple[list, list, list, list]:
     x = []
     y = []
 
-    for (
-        full_team_picks,
-        team_picks,
-        full_opponent_picks,
-        opponent_picks,
-        picked_hero,
-        win,
-    ) in decisions:
+    for index, row in decisions.iterrows():
         input_vec = create_input_vector(
-            team_picks, opponent_picks, picked_hero
+            row.team_picks, row.opponent_picks, row.picked_hero
         )
         x.append(input_vec)
-        y.append(win)
+        y.append(row.win)
 
         augmented = augment_decision_samples(
             (
-                full_team_picks,
-                team_picks,
-                full_opponent_picks,
-                opponent_picks,
-                picked_hero,
-                win,
+                row.full_team_picks,
+                row.team_picks,
+                row.full_opponent_picks,
+                row.opponent_picks,
+                row.picked_hero,
+                row.win,
             ),
             create_input_vector,
         )

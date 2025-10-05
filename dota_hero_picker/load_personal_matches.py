@@ -14,14 +14,16 @@ API_HEROES_ENDPOINT = "https://api.opendota.com/api/heroes"
 CURRENT_PATCH_START = datetime(2025, 8, 15)
 
 
-def get_hero_data(local_file=HEROES_FILE):
+def get_hero_data(local_file: str = HEROES_FILE) -> list[dict[str, str]]:
     if os.path.exists(local_file):
         with open(local_file, "r", encoding="utf-8") as f:
             return json.load(f)
     else:
         response = requests.get(API_HEROES_ENDPOINT)
         if response.status_code != 200:
-            raise Exception(f"Failed to fetch heroes: {response.status_code}")
+            raise DotaPickerError(
+                f"Failed to fetch heroes: {response.status_code}"
+            )
         data = response.json()
         with open(local_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -205,7 +207,7 @@ def fetch_and_save_new_decisions(personal_dota_matches_path, account_id):
         API_MATCHES_ENDPOINT.format(account_id), params=params
     )
     if response.status_code != 200:
-        raise Exception(f"API error: {response.status_code}")
+        raise DotaPickerError(f"API error: {response.status_code}")
     data = response.json()
 
     new_match_ids = [
