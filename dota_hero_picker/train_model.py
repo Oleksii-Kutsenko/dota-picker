@@ -20,13 +20,26 @@ from sklearn.metrics import (
     recall_score,
 )
 from sklearn.model_selection import ParameterGrid, StratifiedShuffleSplit
-from torch.utils.data import DataLoader, TensorDataset
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 import settings
 
-from .load_dota_matches import get_hero_data
+from .data_preparation import (
+    create_input_vector,
+    hero_data,
+    hero_to_id,
+    heroes,
+    id_to_hero,
+    num_counter_pairs,
+    num_heroes,
+    num_synergy_pairs,
+    prepare_training_data,
+)
 from .neural_network import (
+    HeroPredictorWithEmbedding,
     HeroPredictorWithOrder,
+    embedding_dim,
 )
 
 logging.basicConfig(
@@ -36,16 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-hero_data = get_hero_data()
-heroes = [hero_data_item["localized_name"] for hero_data_item in hero_data]
-num_heroes = len(heroes)
-hero_to_id = {hero: idx for idx, hero in enumerate(heroes)}
-id_to_hero = {idx: hero for hero, idx in hero_to_id.items()}
-
-synergy = pd.read_csv(settings.MATCHUPS_STATISTICS_PATH / Path("synergy.csv"))
-counters = pd.read_csv(
-    settings.MATCHUPS_STATISTICS_PATH / Path("counters.csv")
-)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class PyTorchEstimator(BaseEstimator):
@@ -83,51 +87,6 @@ class PyTorchEstimator(BaseEstimator):
     def score(self, X, y):
         preds = self.predict(X)
         return accuracy_score(y, preds)
-
-
-def create_input_vector(team_picks, opponent_picks, actual_pick):
-    # Vector for your team's heroes (size = num_heroes)
-    team_vec = np.zeros(num_heroes)
-    for index, hero in enumerate(team_picks, start=1):
-        if hero and hero in hero_to_id:
-            team_vec[hero_to_id[hero]] = index
-
-    # Vector for opponent's heroes (size = num_heroes)
-    opponent_vec = np.zeros(num_heroes)
-    for index, hero in enumerate(opponent_picks, start=1):
-        if hero and hero in hero_to_id:
-            opponent_vec[hero_to_id[hero]] = index
-
-    # One-hot vector for the hero pick being evaluated
-    pick_vec = np.zeros(num_heroes)
-    if actual_pick in hero_to_id:
-        pick_vec[hero_to_id[actual_pick]] = len(team_picks) + 1
-
-    synergy_vector = np.zeros(num_heroes)
-    counter_vector = np.zeros(num_heroes)
-    all_picks = [pick for pick in (team_picks + opponent_picks) if pick]
-    for first_hero, second_hero in combinations(sorted(all_picks), 2):
-        h1, h2 = sorted([hero_to_id[first_hero], hero_to_id[second_hero]])
-
-        s_score_series = synergy[
-            (synergy["hero_id_1"] == h1) & (synergy["hero_id_2"] == h2)
-        ]["score"]
-        c_score_series = counters[
-            (counters["hero_id_1"] == h1) & (counters["hero_id_2"] == h2)
-        ]["score"]
-
-        if not s_score_series.empty:
-            s_score = s_score_series.iloc[0]
-            synergy_vector[hero_to_id[first_hero]] += s_score
-            synergy_vector[hero_to_id[second_hero]] += s_score
-
-        if not c_score_series.empty:
-            c_score = c_score_series.iloc[0]
-            counter_vector[hero_to_id[first_hero]] += c_score
-            counter_vector[hero_to_id[second_hero]] += c_score
-    return np.concatenate(
-        [team_vec, opponent_vec, pick_vec, synergy_vector, counter_vector]
-    )
 
 
 def load_decisions_from_csv(csv_file_path):
@@ -177,135 +136,73 @@ def load_decisions_from_csv(csv_file_path):
     return decisions
 
 
-def augment_decision_samples(decision, create_input_vector):
+class DotaDataset(Dataset):
+    def __init__(self, features, labels):
+        self.features = features
+        self.labels = torch.tensor(labels, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        sample = self.features[idx]
+        label = self.labels[idx]
+
+        return (
+            torch.tensor(sample[0], dtype=torch.float32),
+            torch.tensor(sample[1], dtype=torch.float32),
+            torch.tensor(sample[2], dtype=torch.float32),
+            torch.tensor(sample[3], dtype=torch.long),  # synergy pairs
+            torch.tensor(sample[4], dtype=torch.long),  # synergy pairs
+            torch.tensor(sample[5], dtype=torch.long),  # counter pairs
+            torch.tensor(sample[6], dtype=torch.float32),  # aggregate features
+            label,
+        )
+
+
+def collate_fn(batch):
     (
-        full_team_picks,
-        team_picks,
-        full_opponent_picks,
-        opponent_picks,
-        picked_hero,
-        win,
-    ) = decision
+        team_vecs,
+        opp_vecs,
+        pick_vecs,
+        team_syns,
+        opp_syns,
+        team_cnts,
+        agg_features,
+        labels,
+    ) = zip(*batch)
 
-    augmented_samples = []
+    team_syns_padded = pad_sequence(
+        team_syns, batch_first=True, padding_value=0
+    )
+    opp_syns_padded = pad_sequence(opp_syns, batch_first=True, padding_value=0)
+    team_cnts_padded = pad_sequence(
+        team_cnts, batch_first=True, padding_value=0
+    )
 
-    own_picks_list = [pick for pick in full_team_picks]
-    enemy_picks_list = [pick for pick in full_opponent_picks]
+    inputs = [
+        torch.stack(team_vecs),
+        torch.stack(opp_vecs),
+        torch.stack(pick_vecs),
+        team_syns_padded,
+        opp_syns_padded,
+        team_cnts_padded,
+        torch.stack(agg_features),
+    ]
 
-    total_own = len(own_picks_list)
-    total_enemy = len(enemy_picks_list)
+    labels_stacked = torch.stack(labels)
 
-    # Your team's perspective: Cumulative with phased opponent inclusion
-    for i in range(total_own):
-        # Cumulative own picks up to but not including current (prior knowledge)
-        prior_own_picks = own_picks_list[:i]
-
-        # Phased opponent picks: Simulate Dota phases (empty early, then add)
-        if i == 0:
-            prior_enemy_picks = []  # No opponents visible yet
-        elif i <= 2:
-            prior_enemy_picks = enemy_picks_list[
-                : min(2, total_enemy)
-            ]  # Early phase: up to 2
-        else:
-            prior_enemy_picks = enemy_picks_list[
-                : min(4, total_enemy)
-            ]  # Later: up to 4
-
-        # Actual pick is the current one
-        actual_pick = own_picks_list[i]
-
-        vec = create_input_vector(
-            prior_own_picks, prior_enemy_picks, actual_pick
-        )
-        augmented_samples.append((vec, win))
-
-    # Opponent's perspective: Swap and invert win
-    inverted_win = 1 - win
-    own_picks_list_inv = enemy_picks_list
-    enemy_picks_list_inv = own_picks_list
-    total_own_inv = len(own_picks_list_inv)
-    total_enemy_inv = len(enemy_picks_list_inv)
-
-    for i in range(total_own_inv):
-        prior_own_picks = own_picks_list_inv[:i]
-
-        if i == 0:
-            prior_enemy_picks = []
-        elif i <= 2:
-            prior_enemy_picks = enemy_picks_list_inv[: min(2, total_enemy_inv)]
-        else:
-            prior_enemy_picks = enemy_picks_list_inv[: min(4, total_enemy_inv)]
-
-        actual_pick = own_picks_list_inv[i]
-
-        vec = create_input_vector(
-            prior_own_picks, prior_enemy_picks, actual_pick
-        )
-        augmented_samples.append((vec, inverted_win))
-
-    return augmented_samples
+    return inputs, labels_stacked
 
 
-def prepare_training_data(decisions, test_size=0.2):
-    x = []
-    y = []
-
-    for (
-        full_team_picks,
-        team_picks,
-        full_opponent_picks,
-        opponent_picks,
-        picked_hero,
-        win,
-    ) in decisions:
-        input_vec = create_input_vector(
-            team_picks, opponent_picks, picked_hero
-        )
-        x.append(input_vec)
-        y.append(win)
-
-        augmented = augment_decision_samples(
-            (
-                full_team_picks,
-                team_picks,
-                full_opponent_picks,
-                opponent_picks,
-                picked_hero,
-                win,
-            ),
-            create_input_vector,
-        )
-        for sample_vec, label in augmented:
-            x.append(sample_vec)
-            y.append(label)
-
-    logger.info(f"Augmented dataset size before split: {len(x)}")
-
-    # Convert to numpy arrays
-    x = np.array(x)
-    y = np.array(y)
-
-    strat_split = StratifiedShuffleSplit(n_splits=1, test_size=test_size)
-    for train_index, val_index in strat_split.split(x, y):
-        x_train, x_val = x[train_index], x[val_index]
-        y_train, y_val = y[train_index], y[val_index]
-
-    return x_train, x_val, y_train, y_val
-
-
-def get_data_loader(x, y, batch_size):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x_tensor = torch.tensor(x, dtype=torch.float32).to(device)
-    y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(1).to(device)
-
-    dataset = TensorDataset(x_tensor, y_tensor)
+def get_data_loader(x_data, y_data, batch_size, shuffle=True):
+    dataset = DotaDataset(x_data, y_data)
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
-        pin_memory=False,
-        num_workers=0,
+        shuffle=shuffle,
+        collate_fn=collate_fn,
+        drop_last=True,
     )
 
 
@@ -321,11 +218,10 @@ def train_model(
     x_val=None,
     y_val=None,
 ):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         "min",
@@ -349,9 +245,13 @@ def train_model(
         train_preds, train_labels = [], []
 
         for inputs, labels in train_loader:
+            inputs = [t.to(device) for t in inputs]
+            labels = labels.to(device)
+
             optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            outputs = model(*inputs)
+            loss = criterion(outputs, labels.unsqueeze(1))
+
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
@@ -428,28 +328,26 @@ def evaluate_model(model, loader, criterion):
     model.eval()
     val_loss = 0
     mid_point = 0.5
-    preds, labels = [], []
+    preds, labels_list = [], []
     with torch.no_grad():
-        for inputs, targets in loader:
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
+        for inputs, labels in loader:
+            inputs = [t.to(device) for t in inputs]
+            labels = labels.to(device)
+
+            outputs = model(*inputs)
+
+            loss = criterion(outputs, labels.unsqueeze(1))
             val_loss += loss.item()
 
-            pred = (
-                (torch.sigmoid(outputs) > mid_point)
-                .float()
-                .detach()
-                .cpu()
-                .numpy()
-            )
+            pred = (torch.sigmoid(outputs) > mid_point).float().cpu().numpy()
             preds.extend(pred)
-            labels.extend(targets.detach().cpu().numpy())
+            labels_list.extend(labels.cpu().numpy())
 
     avg_val_loss = val_loss / len(loader)
-    acc = accuracy_score(labels, preds)
-    prec = precision_score(labels, preds)
-    rec = recall_score(labels, preds)
-    f1 = f1_score(labels, preds)
+    acc = accuracy_score(labels_list, preds)
+    prec = precision_score(labels_list, preds, zero_division=0)
+    rec = recall_score(labels_list, preds, zero_division=0)
+    f1 = f1_score(labels_list, preds, zero_division=0)
     return avg_val_loss, acc, prec, rec, f1
 
 
@@ -504,7 +402,7 @@ def optimize_hyperparameters(x_train, y_train, x_val, y_val, input_size):
 def main(csv_file_path, matchups_statistics_path):
     optimize = False
     epochs = 30
-    lr = 0.001
+    lr = 0.0002
     batch_size = 32
     patience = 3
 
@@ -542,8 +440,7 @@ def main(csv_file_path, matchups_statistics_path):
         logger.info("Training class distribution: %s", train_dist)
         logger.info("Validation class distribution: %s", val_dist)
 
-        input_size = num_heroes * 5
-        model = HeroPredictorWithOrder(input_size)
+        model = HeroPredictorWithEmbedding(num_heroes, embedding_dim)
 
         if optimize:
             model = optimize_hyperparameters(

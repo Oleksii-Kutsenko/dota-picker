@@ -1,5 +1,3 @@
-    Add Factorization Machines for hero interactions: Implement a Factorization Machines layer (using the 2010 Rendle paper formula) in PyTorch to capture pairwise hero synergies and counters; integrate it after the team embeddings to model second-order interactions efficiently.
-    ========================================================================================================================
     Training script probably can be optimized - investigate
     Optimize hyperparameters: Use Optuna to tune model hyperparameters (e.g., learning rate, embedding dimensions, FM latent factors) with a focus on personalization metrics, running trials on your validation set for 50-100 iterations.
 

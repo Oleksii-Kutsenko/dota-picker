@@ -1,13 +1,19 @@
-import os
 from pathlib import Path
 
 import torch
 
 import settings
 import streamlit as st
-from dota_hero_picker.load_dota_matches import get_hero_data
-from dota_hero_picker.neural_network import HeroPredictorWithOrder
-from dota_hero_picker.train_model import create_input_vector
+from dota_hero_picker.load_personal_matches import get_hero_data
+from dota_hero_picker.neural_network import HeroPredictorWithEmbedding
+from dota_hero_picker.train_model import (
+    create_input_vector,
+    embedding_dim,
+    num_counter_pairs,
+    num_synergy_pairs,
+)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 hero_data = get_hero_data()
 hero_positions = {
@@ -146,8 +152,12 @@ id_to_hero = {idx: hero for hero, idx in hero_to_id.items()}
 
 
 def suggest_best_picks(
-    model, team_picks, opponent_picks, allowed_positions, top_n=50
-):
+    model: HeroPredictorWithEmbedding,
+    team_picks: list[str],
+    opponent_picks: list[str],
+    allowed_positions: list[str],
+    top_n: int = 50,
+) -> list[tuple[str, float]]:
     model.eval()
     suggestions = []
 
@@ -161,12 +171,47 @@ def suggest_best_picks(
             hero_pos = hero_positions.get(candidate_hero, [1, 2, 3, 4, 5])
             if not set(hero_pos) & set(allowed_positions):
                 continue
-            input_vec = create_input_vector(
-                team_picks, opponent_picks, candidate_hero
+
+            (
+                team_vec,
+                opp_vec,
+                pick_vec,
+                team_syn,
+                opp_syn,
+                team_cnt,
+                agg_features,
+            ) = create_input_vector(team_picks, opponent_picks, candidate_hero)
+
+            team_vec_t = torch.tensor(team_vec, dtype=torch.float32).unsqueeze(
+                0,
             )
-            input_tensor = torch.tensor([input_vec], dtype=torch.float32)
-            output = model(input_tensor)
+            opp_vec_t = torch.tensor(opp_vec, dtype=torch.float32).unsqueeze(0)
+            pick_vec_t = torch.tensor(pick_vec, dtype=torch.float32).unsqueeze(
+                0,
+            )
+
+            team_syn_t = torch.tensor(team_syn, dtype=torch.long).unsqueeze(0)
+            opp_syn_t = torch.tensor(opp_syn, dtype=torch.long).unsqueeze(0)
+            team_cnt_t = torch.tensor(team_cnt, dtype=torch.long).unsqueeze(0)
+
+            agg_features_t = torch.tensor(
+                agg_features,
+                dtype=torch.float32,
+            ).unsqueeze(0)
+
+            inputs = [
+                team_vec_t.to(device),
+                opp_vec_t.to(device),
+                pick_vec_t.to(device),
+                team_syn_t.to(device),
+                opp_syn_t.to(device),
+                team_cnt_t.to(device),
+                agg_features_t.to(device),
+            ]
+
+            output = model(*inputs)
             prob = torch.sigmoid(output)[0].item()
+
             suggestions.append((candidate_hero, prob))
 
     suggestions.sort(key=lambda x: x[1], reverse=True)
@@ -175,16 +220,20 @@ def suggest_best_picks(
 
 st.title("Dota Picker Web UI")
 
-input_size = num_heroes * 5
 model_path = settings.MODELS_FOLDER_PATH / Path("trained_model.pth")
 
-if os.path.exists(model_path):
-    model = HeroPredictorWithOrder(input_size)
+if model_path.exists():
+    model = HeroPredictorWithEmbedding(
+        num_heroes,
+        embedding_dim,
+    )
     model.load_state_dict(torch.load(model_path))
+    model.to(device)
     st.success(f"Model loaded from {model_path}.")
 else:
     st.error(
-        f"Model file '{model_path}' not found. Please train the model first using train_model.py."
+        f"Model file '{model_path}' not found. "
+        "Please train the model first using train_model.py.",
     )
     st.stop()  # Halt the app if no model
 
@@ -196,7 +245,7 @@ if "opponent_picks" not in st.session_state:
     st.session_state.opponent_picks = []
 
 
-def on_team_change():
+def on_team_change() -> None:
     st.session_state.team_picks = st.session_state.team_picks_widget
     st.session_state.opponent_picks = [
         h
@@ -205,7 +254,7 @@ def on_team_change():
     ]
 
 
-def on_opponent_change():
+def on_opponent_change() -> None:
     st.session_state.opponent_picks = st.session_state.opponent_picks_widget
     st.session_state.team_picks = [
         h
@@ -236,14 +285,19 @@ opponent_picks = st.multiselect(
 )
 
 st.sidebar.header("Filter Suggestions by Position")
-position_options = sorted(
-    set(pos for pos_list in hero_positions.values() for pos in pos_list)
-)
+position_options = [1, 2, 3, 4, 5]
+position_to_name = {
+    1: "Carry",
+    2: "Mid",
+    3: "Offlane",
+    4: "Roaming Support",
+    5: "Hard Support",
+}
 selected_positions = st.sidebar.multiselect(
     "Allowed Positions (select none for all)",
     options=position_options,
-    format_func=lambda p: f"{p} ({['Carry', 'Mid', 'Offlane', 'Roaming Support', 'Hard Support'][p - 1]})",
-    default=position_options,  # Default: all positions
+    format_func=lambda p: f"{p} ({position_to_name[p]})",
+    default=position_options,
 )
 
 if st.button("Get Suggestions"):
@@ -253,7 +307,10 @@ if st.button("Get Suggestions"):
             selected_positions if selected_positions else position_options
         )
         suggestions = suggest_best_picks(
-            model, team_picks, opponent_picks, allowed
+            model,
+            team_picks,
+            opponent_picks,
+            allowed,
         )
         st.subheader("Top Suggested Picks")
         for idx, (hero, prob) in enumerate(suggestions, 1):

@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 
-def compute_metric(pairs_df, condition, average_winrate_func):
+def compute_metric(pairs_df, condition, average_winrate_func) -> None:
     filtered_pairs = pairs_df[
         condition & (pairs_df["hero_id_x"] < pairs_df["hero_id_y"])
     ]

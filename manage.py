@@ -1,6 +1,7 @@
 import importlib
 import logging
 import sys
+from sys import exc_info
 
 import click
 
@@ -11,6 +12,11 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
+logger = logging.getLogger(__name__)
+
+
+class DotaPickerException(Exception):
+    pass
 
 
 @click.group()
@@ -26,7 +32,8 @@ def calculate_matchups():
             settings.PUBLIC_DOTA_MATCHES_PATH,
             settings.MATCHUPS_STATISTICS_PATH,
         )
-    except Exception as critical_error:
+    except DotaPickerException as critical_error:
+        logger.error("Critical Error", exc_info=True)
         click.echo(f"Error: {critical_error}")
 
 
@@ -37,7 +44,8 @@ def load_public_matches():
             "dota_hero_picker.load_public_matches"
         )
         module.main(settings.ACCOUNT_ID, settings.PUBLIC_DOTA_MATCHES_PATH)
-    except Exception as critical_error:
+    except DotaPickerException as critical_error:
+        logger.error("Critical Error", exc_info=True)
         click.echo(f"Error: {critical_error}")
 
 
@@ -49,7 +57,20 @@ def train_model():
             settings.PERSONAL_DOTA_MATCHES_PATH,
             settings.MATCHUPS_STATISTICS_PATH,
         )
-    except Exception as critical_error:
+    except DotaPickerException as critical_error:
+        logger.error("Critical Error", exc_info=True)
+        click.echo(f"Error: {critical_error}")
+
+
+@cli.command()
+def load_personal_matches():
+    try:
+        module = importlib.import_module(
+            "dota_hero_picker.load_personal_matches",
+        )
+        module.main(settings.PERSONAL_DOTA_MATCHES_PATH, settings.ACCOUNT_ID)
+    except DotaPickerException as critical_error:
+        logger.exception("Critical Error")
         click.echo(f"Error: {critical_error}")
 
 
