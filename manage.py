@@ -19,12 +19,12 @@ class DotaPickerError(Exception):
 
 
 @click.group()
-def cli():
+def cli() -> None:
     pass
 
 
 @cli.command()
-def calculate_matchups():
+def calculate_matchups() -> None:
     try:
         module = importlib.import_module("dota_hero_picker.calculate_matchups")
         module.main(
@@ -37,7 +37,7 @@ def calculate_matchups():
 
 
 @cli.command()
-def load_public_matches():
+def load_public_matches() -> None:
     try:
         module = importlib.import_module(
             "dota_hero_picker.load_public_matches",

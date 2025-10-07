@@ -213,7 +213,6 @@ def create_input_vector(
     team_syn_pairs, opp_syn_pairs, team_cnt_pairs = create_pairwise_indices(
         team_picks, opponent_picks
     )
-    breakpoint()
     aggregate_features = create_aggregate_features(team_picks, opponent_picks)
     return (
         team_vec,
@@ -328,7 +327,7 @@ def prepare_training_data(
     x = []
     y = []
 
-    for index, row in decisions.iterrows():
+    for _, row in decisions.iterrows():
         input_vec = create_input_vector(
             row.team_picks, row.opponent_picks, row.picked_hero
         )

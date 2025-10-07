@@ -6,7 +6,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-def query_explorer(sql_query):
+def query_explorer(sql_query) -> list[dict[str, str]]:
     base_url = "https://api.opendota.com/api/explorer"
     params = {"sql": sql_query}
     response = requests.get(base_url, params=params)
@@ -14,7 +14,7 @@ def query_explorer(sql_query):
     return response.json()["rows"]
 
 
-def get_sql(rank_tier):
+def get_sql(rank_tier) -> str:
     return f"""
     SELECT *
     FROM public_matches
@@ -25,7 +25,7 @@ def get_sql(rank_tier):
     """
 
 
-def main(account_id, matches_path):
+def main(account_id, matches_path) -> None:
     resp = requests.get(f"https://api.opendota.com/api/players/{account_id}")
     rank_tier = resp.json().get("rank_tier")
     sql = get_sql(rank_tier)

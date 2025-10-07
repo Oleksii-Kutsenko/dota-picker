@@ -2,14 +2,13 @@ import logging
 import os
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from sklearn.base import BaseEstimator
 from sklearn.metrics import (
     accuracy_score,
@@ -18,6 +17,7 @@ from sklearn.metrics import (
     recall_score,
 )
 from sklearn.model_selection import ParameterGrid
+from torch import nn, optim
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
@@ -154,7 +154,9 @@ def collate_fn(batch):
     )
     opp_syns_padded = pad_sequence(opp_syns, batch_first=True, padding_value=0)
     team_cnts_padded = pad_sequence(
-        team_cnts, batch_first=True, padding_value=0
+        team_cnts,
+        batch_first=True,
+        padding_value=0,
     )
 
     inputs = [
@@ -172,33 +174,45 @@ def collate_fn(batch):
     return inputs, labels_stacked
 
 
-def get_data_loader(x_data, y_data, batch_size, shuffle=True):
+def get_data_loader(x_data, y_data, batch_size):
     dataset = DotaDataset(x_data, y_data)
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=True,
         collate_fn=collate_fn,
         drop_last=True,
     )
 
 
+@dataclass
+class TrainingArguments:
+    """Stores data for training."""
+
+    x_train: list
+    y_train: list
+    x_val: list | None
+    y_val: list | None
+
+    epochs: int = 30
+    lr: float = 0.0003
+    batch_size: int = 32
+    patience: int = 3
+    pos_weight: torch.Tensor
+
+
 def train_model(
     model: HeroPredictorWithEmbedding,
-    x_train: list,
-    y_train: list,
-    epochs: int,
-    lr: float,
-    batch_size: int,
-    pos_weight: torch.Tensor,
-    patience: int = 3,
-    x_val: list | None = None,
-    y_val: list | None = None,
+    training_arguments: TrainingArguments,
 ):
     model.to(device)
 
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=training_arguments.pos_weight)
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=training_arguments.lr,
+        weight_decay=1e-4,
+    )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         "min",
@@ -207,23 +221,34 @@ def train_model(
     )
     mid_point = 0.5
 
-    train_loader = get_data_loader(x_train, y_train, batch_size)
+    train_loader = get_data_loader(
+        training_arguments.x_train,
+        training_arguments.y_train,
+        training_arguments.batch_size,
+    )
 
-    if x_val is not None and y_val is not None:
-        val_loader = get_data_loader(x_val, y_val, batch_size)
+    if (
+        training_arguments.x_val is not None
+        and training_arguments.y_val is not None
+    ):
+        val_loader = get_data_loader(
+            training_arguments.x_val,
+            training_arguments.y_val,
+            training_arguments.batch_size,
+        )
 
     best_val_loss = float("inf")
     patience_counter = 0
     best_weights = None
 
-    for epoch in range(epochs):
+    for epoch in range(training_arguments.epochs):
         model.train()
         train_loss = 0
         train_preds, train_labels = [], []
 
-        for inputs, labels in train_loader:
-            inputs = [t.to(device) for t in inputs]
-            labels = labels.to(device)
+        for batch_inputs, batch_labels in train_loader:
+            inputs = [t.to(device) for t in batch_inputs]
+            labels = batch_labels.to(device)
 
             optimizer.zero_grad()
             outputs = model(*inputs)
@@ -250,7 +275,7 @@ def train_model(
         train_f1 = f1_score(train_labels, train_preds)
 
         logger.info(
-            f"Epoch {epoch + 1}/{epochs} - "
+            f"Epoch {epoch + 1}/{training_arguments.epochs} - "
             f"Train Loss: {avg_train_loss:.4f}, "
             f"Acc: {train_acc:.4f}, "
             f"Prec: {train_prec:.4f}, "
@@ -258,7 +283,7 @@ def train_model(
             f"F1: {train_f1:.4f}",
         )
 
-        if x_val is not None:
+        if training_arguments.x_val is not None:
             val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate_model(
                 model,
                 val_loader,
@@ -280,11 +305,11 @@ def train_model(
                 best_weights = model.state_dict()
             else:
                 patience_counter += 1
-                if patience_counter >= patience:
+                if patience_counter >= training_arguments.patience:
                     logger.info("Early stopping triggered.")
                     break
 
-    if x_val is not None and best_weights is not None:
+    if training_arguments.x_val is not None and best_weights is not None:
         model.load_state_dict(best_weights)
         val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate_model(
             model,
@@ -305,11 +330,12 @@ def evaluate_model(model, loader, criterion):
     model.eval()
     val_loss = 0
     mid_point = 0.5
-    preds, labels_list = [], []
+    preds: list[np.array] = []
+    labels_list = []
     with torch.no_grad():
-        for inputs, labels in loader:
-            inputs = [t.to(device) for t in inputs]
-            labels = labels.to(device)
+        for batch_inputs, batch_labels in loader:
+            inputs = [t.to(device) for t in batch_inputs]
+            labels = batch_labels.to(device)
 
             outputs = model(*inputs)
 
@@ -329,8 +355,9 @@ def evaluate_model(model, loader, criterion):
 
 
 def compute_baseline_f1(
-    y_train: list[str], y_val: list[str]
-) -> tuple[float, int, float, float]:
+    y_train: list[str],
+    y_val: list[str],
+) -> tuple[float, str, dict[str, float], Counter[str]]:
     # Determine majority class from training data
     counter = Counter(y_train)
     majority_class = counter.most_common(1)[0][0]
@@ -339,7 +366,7 @@ def compute_baseline_f1(
     y_pred_baseline = [majority_class] * len(y_val)
 
     # Compute F1-score for the baseline (using pos_label=1 for win prediction)
-    baseline_f1 = f1_score(y_val, y_pred_baseline, pos_label=1)
+    baseline_f1: float = f1_score(y_val, y_pred_baseline, pos_label=1)
 
     # Also compute class distribution for context
     train_dist = {k: v / len(y_train) for k, v in counter.items()}
@@ -350,8 +377,31 @@ def compute_baseline_f1(
 
 
 def optimize_hyperparameters(
-    x_train: list, y_train: list, x_val: list, y_val: list
-):
+    x_train: list[
+        tuple[
+            list[int],
+            list[int],
+            list[int],
+            list[int],
+            list[int],
+            list[int],
+            list[float | int],
+        ]
+    ],
+    y_train: list[int],
+    x_val: list[
+        tuple[
+            list[int],
+            list[int],
+            list[int],
+            list[int],
+            list[int],
+            list[int],
+            list[float | int],
+        ]
+    ],
+    y_val: list[int],
+) -> HeroPredictorWithEmbedding:
     param_grid = {
         "epochs": [10, 20, 30],
         "lr": [0.001, 0.01, 0.1],
@@ -361,7 +411,7 @@ def optimize_hyperparameters(
 
     best_f1 = -1
     best_params = None
-    best_model = None
+    best_model: HeroPredictorWithEmbedding | None = None
 
     for params in ParameterGrid(param_grid):
         logger.info(f"Testing params: {params}")
@@ -377,19 +427,12 @@ def optimize_hyperparameters(
             best_model = estimator.model
 
     logger.info(f"Best params: {best_params} with F1: {best_f1:.4f}")
+    if best_model is None:
+        raise RuntimeError("Best Model is None")
     return best_model
 
 
-def main(csv_file_path: str) -> None:
-    optimize = False
-    epochs = 30
-    lr = 0.0002
-    batch_size = 32
-    patience = 3
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    decision_dataframe = load_decisions_from_csv(csv_file_path)
-
+def compute_pos_weight(decision_dataframe):
     num_of_positives = len(decision_dataframe[decision_dataframe["win"] == 1])
     num_of_negatives = len(decision_dataframe) - num_of_positives
     pos_weight = torch.tensor([num_of_negatives / num_of_positives]).to(device)
@@ -397,6 +440,15 @@ def main(csv_file_path: str) -> None:
     logger.info(f"Number of Wins {num_of_positives}")
     logger.info(f"Number of Loses {num_of_negatives}")
     logger.info(f"Pos Weight {pos_weight}")
+    return pos_weight
+
+
+def main(csv_file_path: str) -> None:
+    """
+    Model training entrypoint
+    """
+    decision_dataframe = load_decisions_from_csv(csv_file_path)
+    pos_weight = compute_pos_weight(decision_dataframe)
 
     x_train, x_val, y_train, y_val = prepare_training_data(decision_dataframe)
     logger.info(
@@ -406,7 +458,8 @@ def main(csv_file_path: str) -> None:
 
     # Compute and print baseline F1-score
     baseline_f1, majority_class, train_dist, val_dist = compute_baseline_f1(
-        y_train, y_val
+        y_train,
+        y_val,
     )
     logger.info(
         "Baseline F1-score "
@@ -418,35 +471,21 @@ def main(csv_file_path: str) -> None:
 
     model = HeroPredictorWithEmbedding(num_heroes, embedding_dim)
 
-    if optimize:
-        model = optimize_hyperparameters(
-            x_train,
-            y_train,
-            x_val,
-            y_val,
-        )
-        torch.save(model.state_dict(), "optimized_model.pth")
-        logger.info(
-            "Hyperparameter optimization complete! "
-            "Model saved as 'optimized_model.pth'.",
-        )
-    else:
-        model = train_model(
-            model,
-            x_train,
-            y_train,
-            epochs,
-            lr,
-            batch_size,
-            pos_weight,
-            patience,
-            x_val,
-            y_val,
-        )
-        torch.save(
-            model.state_dict(),
-            settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
-        )
-        logger.info(
-            "Training complete! Model saved as 'trained_model.pth'.",
-        )
+    training_arguments = TrainingArguments(
+        x_train=x_train,
+        y_train=y_train,
+        x_val=x_val,
+        y_val=y_val,
+        pos_weight=pos_weight,
+    )
+    model = train_model(
+        model,
+        training_arguments,
+    )
+    torch.save(
+        model.state_dict(),
+        settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
+    )
+    logger.info(
+        "Training complete! Model saved as 'trained_model.pth'.",
+    )
