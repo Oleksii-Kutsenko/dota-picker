@@ -1,12 +1,55 @@
 import torch
-import torch.nn as nn
 import torch.nn.init as init
+from torch import nn
 
 from .data_preparation import (
-    counter_init_table,
     embedding_dim,
-    synergy_init_table,
 )
+
+
+class HeroEmbeddingPredictor(nn.Module):
+    def __init__(
+        self,
+        num_heroes: int,
+        embed_dim=64,
+        dropout_rate=0.1,
+    ):
+        super().__init__()
+        self.num_heroes = num_heroes
+        self.embed_dim = embed_dim
+
+        self.hero_emb = nn.Embedding(num_heroes, embed_dim, padding_idx=0)
+        nn.init.kaiming_normal_(
+            self.hero_emb.weight, mode="fan_in", nonlinearity="relu"
+        )
+
+        self.dropout = nn.Dropout(dropout_rate)
+        self.head = nn.Sequential(
+            nn.Linear(2 * embed_dim, 64),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(64, 1),
+        )
+
+    def _team_embedding(self, hero_ids):
+        embeds = self.hero_emb(hero_ids.clamp(0, self.num_heroes - 1))
+
+        mask = (hero_ids != 0).float().unsqueeze(-1)
+        masked = embeds * mask
+        summed = masked.sum(dim=1)
+        counts = mask.sum(dim=1).clamp(min=1)
+
+        avg = summed / counts
+        return self.dropout(avg)
+
+    def forward(self, team_hero_ids, opp_hero_ids):
+        team_avg = self._team_embedding(team_hero_ids)
+        opp_avg = self._team_embedding(opp_hero_ids)
+
+        combined = torch.cat([team_avg, opp_avg], dim=1)
+        logits = self.head(combined).squeeze(1)
+
+        return logits
 
 
 class HeroPredictorWithEmbedding(nn.Module):

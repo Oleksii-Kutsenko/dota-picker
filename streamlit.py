@@ -89,7 +89,7 @@ hero_positions = {
     "Marci": [4, 5],
     "Mars": [3],
     "Medusa": [1],
-    "Nature's Prophet": [3, 4],
+    "Nature's Prophet": [1, 2, 3, 4],
     "Nyx Assassin": [3, 4],
     "Outworld Destroyer": [2],
     "Pangolier": [3],
@@ -154,7 +154,7 @@ def suggest_best_picks(
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],
-    top_n: int = 50,
+    top_n: int = 100,
 ) -> list[tuple[str, float]]:
     model.eval()
     suggestions = []

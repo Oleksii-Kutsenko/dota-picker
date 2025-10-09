@@ -119,9 +119,11 @@ class DotaDataset(Dataset):
         self.labels = torch.tensor(labels, dtype=torch.float32)
 
     def __len__(self):
+        """Return dataset length."""
         return len(self.labels)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> tuple:
+        """Return training example."""
         sample = self.features[idx]
         label = self.labels[idx]
 
@@ -147,10 +149,12 @@ def collate_fn(batch):
         team_cnts,
         agg_features,
         labels,
-    ) = zip(*batch)
+    ) = zip(*batch, strict=True)
 
     team_syns_padded = pad_sequence(
-        team_syns, batch_first=True, padding_value=0
+        team_syns,
+        batch_first=True,
+        padding_value=0,
     )
     opp_syns_padded = pad_sequence(opp_syns, batch_first=True, padding_value=0)
     team_cnts_padded = pad_sequence(
@@ -174,7 +178,7 @@ def collate_fn(batch):
     return inputs, labels_stacked
 
 
-def get_data_loader(x_data, y_data, batch_size):
+def get_data_loader(x_data: list, y_data: list, batch_size: int) -> DataLoader:
     dataset = DotaDataset(x_data, y_data)
     return DataLoader(
         dataset,
@@ -194,17 +198,17 @@ class TrainingArguments:
     x_val: list | None
     y_val: list | None
 
+    pos_weight: torch.Tensor
     epochs: int = 30
     lr: float = 0.0003
     batch_size: int = 32
     patience: int = 3
-    pos_weight: torch.Tensor
 
 
 def train_model(
     model: HeroPredictorWithEmbedding,
     training_arguments: TrainingArguments,
-):
+) -> HeroPredictorWithEmbedding:
     model.to(device)
 
     criterion = nn.BCEWithLogitsLoss(pos_weight=training_arguments.pos_weight)
@@ -227,6 +231,7 @@ def train_model(
         training_arguments.batch_size,
     )
 
+    val_loader = None
     if (
         training_arguments.x_val is not None
         and training_arguments.y_val is not None
@@ -244,7 +249,8 @@ def train_model(
     for epoch in range(training_arguments.epochs):
         model.train()
         train_loss = 0
-        train_preds, train_labels = [], []
+        train_preds: list[torch.Tensor] = []
+        train_labels: list[torch.Tensor] = []
 
         for batch_inputs, batch_labels in train_loader:
             inputs = [t.to(device) for t in batch_inputs]
@@ -283,7 +289,7 @@ def train_model(
             f"F1: {train_f1:.4f}",
         )
 
-        if training_arguments.x_val is not None:
+        if val_loader is not None and training_arguments.x_val is not None:
             val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate_model(
                 model,
                 val_loader,
@@ -326,11 +332,15 @@ def train_model(
     return model
 
 
-def evaluate_model(model, loader, criterion):
+def evaluate_model(
+    model: HeroPredictorWithEmbedding,
+    loader: DataLoader[list[torch.Tensor]],
+    criterion: nn.BCEWithLogitsLoss,
+) -> tuple[float, float, float, float, float]:
     model.eval()
     val_loss = 0
     mid_point = 0.5
-    preds: list[np.array] = []
+    preds: list[np.ndarray] = []
     labels_list = []
     with torch.no_grad():
         for batch_inputs, batch_labels in loader:
@@ -347,17 +357,17 @@ def evaluate_model(model, loader, criterion):
             labels_list.extend(labels.cpu().numpy())
 
     avg_val_loss = val_loss / len(loader)
-    acc = accuracy_score(labels_list, preds)
-    prec = precision_score(labels_list, preds, zero_division=0)
-    rec = recall_score(labels_list, preds, zero_division=0)
-    f1 = f1_score(labels_list, preds, zero_division=0)
+    acc: float = accuracy_score(labels_list, preds)
+    prec: float = precision_score(labels_list, preds, zero_division=0)
+    rec: float = recall_score(labels_list, preds, zero_division=0)
+    f1: float = f1_score(labels_list, preds, zero_division=0)
     return avg_val_loss, acc, prec, rec, f1
 
 
 def compute_baseline_f1(
     y_train: list[str],
     y_val: list[str],
-) -> tuple[float, str, dict[str, float], Counter[str]]:
+) -> tuple[float, str, dict[str, float], dict[str, float]]:
     # Determine majority class from training data
     counter = Counter(y_train)
     majority_class = counter.most_common(1)[0][0]
@@ -370,8 +380,8 @@ def compute_baseline_f1(
 
     # Also compute class distribution for context
     train_dist = {k: v / len(y_train) for k, v in counter.items()}
-    val_dist = Counter(y_val)
-    val_dist = {k: v / len(y_val) for k, v in val_dist.items()}
+    val_counter = Counter(y_val)
+    val_dist = {k: v / len(y_val) for k, v in val_counter.items()}
 
     return baseline_f1, majority_class, train_dist, val_dist
 
@@ -428,11 +438,12 @@ def optimize_hyperparameters(
 
     logger.info(f"Best params: {best_params} with F1: {best_f1:.4f}")
     if best_model is None:
-        raise RuntimeError("Best Model is None")
+        error_msg = "Best Model is None"
+        raise RuntimeError(error_msg)
     return best_model
 
 
-def compute_pos_weight(decision_dataframe):
+def compute_pos_weight(decision_dataframe: pd.DataFrame) -> torch.Tensor:
     num_of_positives = len(decision_dataframe[decision_dataframe["win"] == 1])
     num_of_negatives = len(decision_dataframe) - num_of_positives
     pos_weight = torch.tensor([num_of_negatives / num_of_positives]).to(device)
@@ -444,10 +455,9 @@ def compute_pos_weight(decision_dataframe):
 
 
 def main(csv_file_path: str) -> None:
-    """
-    Model training entrypoint
-    """
+    """Model training entrypoint."""
     decision_dataframe = load_decisions_from_csv(csv_file_path)
+    # TODO: Continue here split before preparation, augment for training data
     pos_weight = compute_pos_weight(decision_dataframe)
 
     x_train, x_val, y_train, y_val = prepare_training_data(decision_dataframe)

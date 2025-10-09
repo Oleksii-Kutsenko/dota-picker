@@ -26,170 +26,6 @@ id_to_hero = {idx: hero for hero, idx in hero_to_id.items()}
 embedding_dim = 32
 
 
-def create_pair_mappings_and_init(
-    num_heroes, embedding_dim, synergy_df, counters_df
-):
-    synergy_pair_to_idx = {}
-    synergy_init = [torch.zeros(embedding_dim)]
-    idx = 1
-    for i in range(num_heroes):
-        for j in range(i + 1, num_heroes):
-            synergy_pair_to_idx[(i, j)] = idx
-            s_score = synergy_df[
-                (synergy_df["hero_id_1"] == i) & (synergy_df["hero_id_2"] == j)
-            ]["score"]
-            score = s_score.iloc[0] if not s_score.empty else 0.0
-            init_vec = torch.randn(embedding_dim) * 0.01
-            init_vec[0] = score
-            synergy_init.append(init_vec)
-            idx += 1
-
-    counter_pair_to_idx = {}
-    counter_init = [torch.zeros(embedding_dim)]
-    idx = 1
-    for i in range(num_heroes):
-        for j in range(num_heroes):
-            if i != j:
-                counter_pair_to_idx[(i, j)] = idx
-                c_score = counters_df[
-                    (counters_df["hero_id_1"] == i)
-                    & (counters_df["hero_id_2"] == j)
-                ]["score"]
-                score = c_score.iloc[0] if not c_score.empty else 0.0
-                init_vec = torch.randn(embedding_dim) * 0.01
-                init_vec[0] = score
-                counter_init.append(init_vec)
-                idx += 1
-
-    return (
-        synergy_pair_to_idx,
-        torch.stack(synergy_init),
-        counter_pair_to_idx,
-        torch.stack(counter_init),
-    )
-
-
-(
-    synergy_pair_to_idx,
-    synergy_init_table,
-    counter_pair_to_idx,
-    counter_init_table,
-) = create_pair_mappings_and_init(num_heroes, embedding_dim, synergy, counters)
-num_synergy_pairs = len(synergy_pair_to_idx)
-num_counter_pairs = len(counter_pair_to_idx)
-
-
-def create_pairwise_indices(team_picks, opponent_picks):
-    team_synergy_pairs = []
-    for hero1, hero2 in combinations([hero for hero in team_picks if hero], 2):
-        hero_id_1 = hero_to_id.get(hero1, -1)
-        hero_id_2 = hero_to_id.get(hero2, -1)
-        if hero_id_1 == -1 or hero_id_2 == -1:
-            continue
-        pair = tuple(sorted([hero_id_1, hero_id_2]))
-        idx = synergy_pair_to_idx.get(pair)
-        if idx is not None:
-            team_synergy_pairs.append(idx)
-
-    opponent_synergy_pairs = []
-    for hero1, hero2 in combinations(
-        [hero for hero in opponent_picks if hero], 2
-    ):
-        hero_id_1 = hero_to_id.get(hero1, -1)
-        hero_id_2 = hero_to_id.get(hero2, -1)
-        if hero_id_1 == -1 or hero_id_2 == -1:
-            continue
-        pair = tuple(sorted([hero_id_1, hero_id_2]))
-        idx = synergy_pair_to_idx.get(pair)
-        if idx is not None:
-            opponent_synergy_pairs.append(idx)
-
-    team_counter_pairs = []
-    for team_hero in [hero for hero in team_picks if hero]:
-        for opp_hero in [hero for hero in opponent_picks if hero]:
-            team_hero_id = hero_to_id.get(team_hero, -1)
-            opp_hero_id = hero_to_id.get(opp_hero, -1)
-            if team_hero_id == -1 or opp_hero_id == -1:
-                continue
-            pair = (team_hero_id, opp_hero_id)
-            idx = counter_pair_to_idx.get(pair)
-            if idx is not None:
-                team_counter_pairs.append(idx)
-
-    return team_synergy_pairs, opponent_synergy_pairs, team_counter_pairs
-
-
-def create_aggregate_features(team_picks, opponent_picks):
-    features = []
-
-    team_synergies = []
-    for hero1, hero2 in combinations([hero for hero in team_picks if hero], 2):
-        hero_id_1 = hero_to_id[hero1]
-        hero_id_2 = hero_to_id[hero2]
-
-        s_score = synergy[
-            (synergy["hero_id_1"] == hero_id_1)
-            & (synergy["hero_id_2"] == hero_id_2)
-        ]["score"]
-        if not s_score.empty:
-            team_synergies.append(s_score.iloc[0])
-
-    opponent_synergies = []
-    for hero1, hero2 in combinations(
-        [hero for hero in opponent_picks if hero], 2
-    ):
-        hero_id_1 = hero_to_id[hero1]
-        hero_id_2 = hero_to_id[hero2]
-
-        s_score = synergy[
-            (synergy["hero_id_1"] == hero_id_1)
-            & (synergy["hero_id_2"] == hero_id_2)
-        ]["score"]
-        if not s_score.empty:
-            opponent_synergies.append(s_score.iloc[0])
-    features.extend(
-        [
-            np.mean(team_synergies) if team_synergies else 0,
-            np.std(team_synergies) if team_synergies else 0,
-            np.mean(opponent_synergies) if opponent_synergies else 0,
-            np.std(opponent_synergies) if opponent_synergies else 0,
-        ]
-    )
-
-    team_counters = []
-    enemy_counters = []
-
-    for team_hero in [hero for hero in team_picks if hero]:
-        for opp_hero in [hero for hero in opponent_picks if hero]:
-            team_hero_id, opp_hero_id = (
-                hero_to_id[team_hero],
-                hero_to_id[opp_hero],
-            )
-
-            c_score = counters[
-                (counters["hero_id_1"] == team_hero_id)
-                & (counters["hero_id_2"] == opp_hero_id)
-            ]["score"]
-            if not c_score.empty:
-                team_counters.append(c_score.iloc[0])
-                enemy_counters.append(c_score.iloc[0] * -1)
-
-    features.extend(
-        [
-            np.mean(team_counters) if team_counters else 0,
-            np.std(team_counters) if team_counters else 0,
-            np.mean(enemy_counters) if enemy_counters else 0,
-            np.std(enemy_counters) if enemy_counters else 0,
-            (np.mean(team_counters) - np.mean(enemy_counters))
-            if team_counters and enemy_counters
-            else 0,
-            len([hero for hero in team_picks if hero]),
-            len([hero for hero in opponent_picks if hero]),
-        ]
-    )
-    return np.array(features)
-
-
 def create_input_vector(
     team_picks: list, opponent_picks: list, actual_pick: str
 ) -> tuple:
@@ -210,18 +46,10 @@ def create_input_vector(
     if actual_pick in hero_to_id:
         pick_vec[hero_to_id[actual_pick]] = len(team_picks) + 1
 
-    team_syn_pairs, opp_syn_pairs, team_cnt_pairs = create_pairwise_indices(
-        team_picks, opponent_picks
-    )
-    aggregate_features = create_aggregate_features(team_picks, opponent_picks)
     return (
         team_vec,
         opponent_vec,
         pick_vec,
-        team_syn_pairs,
-        opp_syn_pairs,
-        team_cnt_pairs,
-        aggregate_features,
     )
 
 
@@ -328,6 +156,7 @@ def prepare_training_data(
     y = []
 
     for _, row in decisions.iterrows():
+        breakpoint()
         input_vec = create_input_vector(
             row.team_picks, row.opponent_picks, row.picked_hero
         )

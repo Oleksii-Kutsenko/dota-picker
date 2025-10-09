@@ -51,16 +51,18 @@ def read_existing_matches(csv_path):
     return match_ids, max_start_time
 
 
-def parse_draft(match, account_id, hero_map):
+def parse_draft(match, account_id):
     picks_bans = match.get("picks_bans", [])
     if not picks_bans:
         return None
 
+    your_player = None
     players = match.get("players", [])
-    your_player = next(
-        (p for p in players if p.get("account_id") == account_id), None
-    )
-    if not your_player:
+    for player in players:
+        if player.get("account_id") == account_id:
+            your_player = player
+            break
+    if your_player is None:
         return None
 
     your_hero_id = your_player.get("hero_id")
@@ -78,58 +80,25 @@ def parse_draft(match, account_id, hero_map):
         key=lambda x: x["order"],
     )
 
-    my_pick_index = next(
-        (
-            i
-            for i, p in enumerate(team_picks_sorted)
-            if p["hero_id"] == your_hero_id
-        ),
-        None,
-    )
-    if my_pick_index is None:
-        return None
-
-    team_picks = [
-        hero_map[p["hero_id"]]
-        for p in team_picks_sorted[:my_pick_index]
-        if p["hero_id"] in actually_picked_heroes
-    ]
-
-    # Lookup limits based on my_pick_index (0-4 picks; caps at 4)
-    opponent_pick_limits = [0, 0, 2, 2, 4]
-    limit = opponent_pick_limits[min(my_pick_index, 4)]
-
-    opponent_picks = [
-        hero_map[p["hero_id"]]
-        for p in opponent_picks_sorted[:limit]
-        if p["hero_id"] in actually_picked_heroes
-    ]
-
     win = 1 if match.get("radiant_win") == (your_team == 0) else 0
 
     return {
-        "full_team_picks": [
-            hero_map[pick["hero_id"]] for pick in team_picks_sorted
-        ],
-        "team_picks": team_picks,
-        "full_opponent_picks": [
-            hero_map[pick["hero_id"]] for pick in opponent_picks_sorted
-        ],
-        "opponent_picks": opponent_picks,
-        "picked_hero": hero_map.get(your_hero_id, "Unknown"),
+        "team_picks": [pick["hero_id"] for pick in team_picks_sorted],
+        "opponent_picks": [pick["hero_id"] for pick in opponent_picks_sorted],
+        "picked_hero": your_hero_id,
         "win": win,
         "match_id": match["match_id"],
         "start_time": match.get("start_time", 0),
     }
 
 
-def fetch_match_details(match_ids, account_id, hero_map, delay_seconds=1.1):
+def fetch_match_details(match_ids, account_id, delay_seconds=1.1):
     detailed_decisions = []
     for i, match_id in enumerate(match_ids):
         response = requests.get(API_MATCH_DETAILS_ENDPOINT.format(match_id))
         if response.status_code == 200:
             match = response.json()
-            data = parse_draft(match, account_id, hero_map)
+            data = parse_draft(match, account_id)
             if data:
                 detailed_decisions.append(data)
         else:
@@ -147,9 +116,7 @@ def save_to_csv(csv_path, new_decisions):
     else:
         df_existing = pd.DataFrame(
             columns=[
-                "full_team_picks",
                 "team_picks",
-                "full_opponent_picks",
                 "opponent_picks",
                 "picked_hero",
                 "win",
@@ -158,17 +125,10 @@ def save_to_csv(csv_path, new_decisions):
             ]
         )
 
-    # Convert new decisions to DataFrame
     data_rows = [
         {
-            "full_team_picks": ",".join(dec["full_team_picks"])
-            if dec["full_team_picks"]
-            else None,
-            "team_picks": ",".join(dec["team_picks"]),
-            "full_opponent_picks": ",".join(dec["full_opponent_picks"])
-            if dec["full_opponent_picks"]
-            else None,
-            "opponent_picks": ",".join(dec["opponent_picks"]),
+            "team_picks": str(dec["team_picks"]),
+            "opponent_picks": str(dec["opponent_picks"]),
             "picked_hero": dec["picked_hero"],
             "win": dec["win"],
             "match_id": dec["match_id"],
@@ -190,7 +150,6 @@ def save_to_csv(csv_path, new_decisions):
 
 
 def fetch_and_save_new_decisions(personal_dota_matches_path, account_id):
-    hero_map = load_hero_map()
     existing_match_ids, max_start_time = read_existing_matches(
         personal_dota_matches_path
     )
@@ -221,7 +180,7 @@ def fetch_and_save_new_decisions(personal_dota_matches_path, account_id):
         print("No new current-patch matches.")
         return 0
 
-    detailed = fetch_match_details(new_match_ids, account_id, hero_map)
+    detailed = fetch_match_details(new_match_ids, account_id)
     save_to_csv(personal_dota_matches_path, detailed)
     print(f"Saved {len(detailed)} new decisions.")
     return len(detailed)
