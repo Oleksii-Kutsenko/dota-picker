@@ -1,10 +1,15 @@
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 import settings
 import streamlit as st
-from dota_hero_picker.data_preparation import create_input_vector
+from dota_hero_picker.data_preparation import (
+    api_id_2_model_id,
+    create_input_vector,
+    model_id_2_hero_name,
+)
 from dota_hero_picker.load_personal_matches import get_hero_data
 from dota_hero_picker.neural_network import RecommenderWithPositionalAttention
 
@@ -147,68 +152,47 @@ id_to_hero = {idx: hero for hero, idx in hero_to_id.items()}
 
 
 def suggest_best_picks(
-    model: HeroPredictorWithEmbedding,
+    model: RecommenderWithPositionalAttention,
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],
-    top_n: int = 100,
+    top_n: int = 20,
+    max_picks: int = 5,
 ) -> list[tuple[str, float]]:
     model.eval()
     suggestions = []
 
     with torch.no_grad():
-        for candidate_hero in heroes:
-            if (
-                candidate_hero in team_picks
-                or candidate_hero in opponent_picks
-            ):
+        # Convert current picks to model IDs and pad to max_picks (without candidate)
+        team_hero_ids = [
+            hero_to_model_id.get(h, 0) for h in team_picks[:max_picks]
+        ] + [0] * (max_picks - len(team_picks))
+        opp_hero_ids = [
+            hero_to_model_id.get(h, 0) for h in opponent_picks[:max_picks]
+        ] + [0] * (max_picks - len(opponent_picks))
+
+        team_tensor = torch.tensor([team_hero_ids], dtype=torch.long).to(
+            device
+        )
+        opp_tensor = torch.tensor([opp_hero_ids], dtype=torch.long).to(device)
+        logits = model(team_tensor, opp_tensor)
+        probs = F.softmax(logits, dim=1)[
+            0
+        ]  # Prob distribution over all heroes (0 is padding/ignore)
+
+        # Filter and rank unpicked heroes that fit positions
+        picked_names = set(team_picks + opponent_picks)
+        for model_id in range(1, num_heroes + 1):
+            hero_name = model_id_2_hero_name.get(model_id, "")  # Fixed mapping
+            if hero_name in picked_names:
                 continue
-            hero_pos = hero_positions.get(candidate_hero, [1, 2, 3, 4, 5])
-            if not set(hero_pos) & set(allowed_positions):
+            hero_pos = hero_positions.get(hero_name, [1, 2, 3, 4, 5])
+            if not any(pos in allowed_positions for pos in hero_pos):
                 continue
+            prob = probs[model_id].item()
+            suggestions.append((hero_name, prob))
 
-            (
-                team_vec,
-                opp_vec,
-                pick_vec,
-                team_syn,
-                opp_syn,
-                team_cnt,
-                agg_features,
-            ) = create_input_vector(team_picks, opponent_picks, candidate_hero)
-
-            team_vec_t = torch.tensor(team_vec, dtype=torch.float32).unsqueeze(
-                0,
-            )
-            opp_vec_t = torch.tensor(opp_vec, dtype=torch.float32).unsqueeze(0)
-            pick_vec_t = torch.tensor(pick_vec, dtype=torch.float32).unsqueeze(
-                0,
-            )
-
-            team_syn_t = torch.tensor(team_syn, dtype=torch.long).unsqueeze(0)
-            opp_syn_t = torch.tensor(opp_syn, dtype=torch.long).unsqueeze(0)
-            team_cnt_t = torch.tensor(team_cnt, dtype=torch.long).unsqueeze(0)
-
-            agg_features_t = torch.tensor(
-                agg_features,
-                dtype=torch.float32,
-            ).unsqueeze(0)
-
-            inputs = [
-                team_vec_t.to(device),
-                opp_vec_t.to(device),
-                pick_vec_t.to(device),
-                team_syn_t.to(device),
-                opp_syn_t.to(device),
-                team_cnt_t.to(device),
-                agg_features_t.to(device),
-            ]
-
-            output = model(*inputs)
-            prob = torch.sigmoid(output)[0].item()
-
-            suggestions.append((candidate_hero, prob))
-
+    # Sort by probability descending
     suggestions.sort(key=lambda x: x[1], reverse=True)
     return suggestions[:top_n]
 
@@ -223,6 +207,7 @@ if model_path.exists():
     )
     model.load_state_dict(torch.load(model_path))
     model.to(device)
+    model.eval()
     st.success(f"Model loaded from {model_path}.")
 else:
     st.error(

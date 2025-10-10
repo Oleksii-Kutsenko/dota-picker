@@ -46,6 +46,38 @@ logger = logging.getLogger()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def compute_ranking_metrics(
+    logits: np.ndarray, targets: np.ndarray, k: int = 5
+) -> tuple[float, float, float, float, float, float]:
+    """Compute ranking metrics: Top-k Acc, MRR, Prec@k, Rec@k, F1@k, Macro F1."""
+    top_k_preds = np.argpartition(logits, -k, axis=1)[:, -k:]
+    targets_exp = targets[:, np.newaxis]
+    is_in_top_k = np.isin(targets_exp, top_k_preds).any(axis=1)
+    top_k_acc = np.mean(is_in_top_k)
+
+    mrr = 0.0
+    num_samples = len(targets)
+    for i in range(num_samples):
+        ranked_indices = np.argsort(logits[i])[::-1]
+        rank_pos = np.where(ranked_indices == targets[i])[0]
+        if len(rank_pos) > 0:
+            mrr += 1.0 / (rank_pos[0] + 1)
+    mrr /= num_samples
+
+    precision_k = np.sum(is_in_top_k) / (num_samples * k)
+    recall_k = top_k_acc
+    f1_k = (
+        2 * (precision_k * recall_k) / (precision_k + recall_k)
+        if (precision_k + recall_k) > 0
+        else 0.0
+    )
+
+    top1_preds = np.argmax(logits, axis=1)
+    macro_f1 = f1_score(targets, top1_preds, average="macro", zero_division=0)
+
+    return top_k_acc, mrr, precision_k, recall_k, f1_k, macro_f1
+
+
 def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
     if not os.path.exists(csv_file_path):
         raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
@@ -122,8 +154,44 @@ class TrainingArguments:
     val_dataset: DotaDataset
     epochs: int = 60
     lr: float = 0.00001
-    batch_size: int = 64
+    batch_size: int = 32
     patience: int = 3
+
+
+def evaluate_model(
+    model: RecommenderWithPositionalAttention,
+    loader: DataLoader,
+    criterion: nn.CrossEntropyLoss,
+    k: int = 5,
+) -> tuple[float, float, float, float, float, float, float]:
+    model.eval()
+    total_loss = 0.0
+    all_logits = []
+    all_targets = []
+
+    with torch.no_grad():
+        for batch_data in loader:
+            team_picks, opp_picks, targets, _, _ = [
+                t.to(device) for t in batch_data
+            ]
+
+            outputs = model(team_picks, opp_picks)
+            loss = criterion(outputs, targets)
+            total_loss += loss.item() * len(targets)
+
+            all_logits.append(outputs.cpu())
+            all_targets.append(targets.cpu())
+
+    avg_loss = total_loss / len(loader.dataset)
+
+    all_logits = torch.cat(all_logits, dim=0).numpy()
+    all_targets = torch.cat(all_targets).numpy()
+
+    top_k_acc, mrr, prec_k, rec_k, f1_k, macro_f1 = compute_ranking_metrics(
+        all_logits, all_targets, k
+    )
+
+    return avg_loss, top_k_acc, mrr, prec_k, rec_k, f1_k, macro_f1
 
 
 def train_model(
@@ -154,7 +222,7 @@ def train_model(
     for epoch in range(training_arguments.epochs):
         model.train()
         epoch_train_loss = 0.0
-        epoch_train_preds = []
+        epoch_train_logits = []
         epoch_train_labels = []
 
         for batch_data in train_loader:
@@ -169,6 +237,8 @@ def train_model(
             weights = torch.ones_like(per_sample_loss)
             weights += is_win * 1.0
             weights += (is_win * is_my_decision) * 2.0
+            weights -= ((1.0 - is_win) * is_my_decision) * 0.5
+            weights = torch.clamp(weights, min=0.1)
 
             loss = (per_sample_loss * weights).mean()
 
@@ -177,45 +247,43 @@ def train_model(
             optimizer.step()
 
             epoch_train_loss += loss.item()
-            predicted_classes = torch.argmax(outputs, dim=1)
-            epoch_train_preds.extend(predicted_classes.cpu().numpy())
+            epoch_train_logits.append(outputs.detach().cpu())
             epoch_train_labels.extend(targets.cpu().numpy())
 
         avg_train_loss = epoch_train_loss / len(train_loader)
-        train_acc = accuracy_score(epoch_train_labels, epoch_train_preds)
-        train_prec = precision_score(
-            epoch_train_labels,
-            epoch_train_preds,
-            average="weighted",
-            zero_division=0,
-        )
-        train_rec = recall_score(
-            epoch_train_labels,
-            epoch_train_preds,
-            average="weighted",
-            zero_division=0,
-        )
-        train_f1 = f1_score(
-            epoch_train_labels,
-            epoch_train_preds,
-            average="weighted",
-            zero_division=0,
-        )
+        all_train_logits = torch.cat(epoch_train_logits, dim=0).numpy()
+        all_train_targets = np.array(epoch_train_labels)
+        (
+            train_top5,
+            train_mrr,
+            train_prec5,
+            train_rec5,
+            train_f15,
+            train_macro_f1,
+        ) = compute_ranking_metrics(all_train_logits, all_train_targets, k=5)
 
         logger.info(
             f"Epoch {epoch + 1}/{training_arguments.epochs} | "
-            f"Train Loss: {avg_train_loss:.4f} | Acc: {train_acc:.4f} | "
-            f"Prec: {train_prec:.4f} | Rec: {train_rec:.4f} | F1: {train_f1:.4f}"
+            f"Train Loss: {avg_train_loss:.4f} | Top-5 Acc: {train_top5:.4f} | "
+            f"MRR: {train_mrr:.4f} | Prec@5: {train_prec5:.4f} | "
+            f"Rec@5: {train_rec5:.4f} | F1: {train_f15:.4f}"
         )
 
-        val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate_model(
-            model, val_loader, nn.CrossEntropyLoss()
-        )
+        (
+            val_loss,
+            val_top5,
+            val_mrr,
+            val_prec5,
+            val_rec5,
+            val_f15,
+            val_macro_f1,
+        ) = evaluate_model(model, val_loader, nn.CrossEntropyLoss())
         scheduler.step(val_loss)
 
         logger.info(
-            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | "
-            f"Val Prec: {val_prec:.4f} | Val Rec: {val_rec:.4f} | Val F1: {val_f1:.4f}"
+            f"Val Log Loss: {val_loss:.4f} | Top-5 Acc: {val_top5:.4f} | "
+            f"MRR: {val_mrr:.4f} | Val Prec@5: {val_prec5:.4f} | "
+            f"Val Rec@5: {val_rec5:.4f} | Val F1: {val_f15:.4f} | Val Macro F1: {val_macro_f1:.4f}"
         )
 
         if val_loss < best_val_loss:
@@ -240,46 +308,6 @@ def train_model(
         )
 
     return model
-
-
-def evaluate_model(
-    model: RecommenderWithPositionalAttention,
-    loader: DataLoader[list[torch.Tensor]],
-    criterion: nn.BCEWithLogitsLoss,
-) -> tuple[float, float, float, float, float]:
-    model.eval()
-    total_val_loss = 0.0
-    all_preds: list = []
-    all_labels: list = []
-
-    with torch.no_grad():
-        for batch_data in loader:
-            team_picks, opp_picks, targets, _, _ = [
-                t.to(device) for t in batch_data
-            ]
-
-            outputs = model(team_picks, opp_picks)
-            loss = criterion(outputs, targets)
-
-            total_val_loss += loss.item()
-
-            preds = torch.argmax(outputs, dim=1).cpu().numpy()
-
-            all_preds.extend(preds)
-            all_labels.extend(targets.cpu().numpy())
-
-    avg_val_loss = total_val_loss / len(loader)
-
-    acc = accuracy_score(all_labels, all_preds)
-    prec = precision_score(
-        all_labels, all_preds, average="weighted", zero_division=0
-    )
-    rec = recall_score(
-        all_labels, all_preds, average="weighted", zero_division=0
-    )
-    f1 = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
-
-    return avg_val_loss, acc, prec, rec, f1
 
 
 def compute_baseline_f1(
