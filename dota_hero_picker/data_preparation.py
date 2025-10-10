@@ -1,6 +1,6 @@
 import logging
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from itertools import combinations
 from pathlib import Path
 
@@ -104,7 +104,8 @@ def create_augmented_dataframe(train_dataframe):
                 }
             )
 
-    return pd.DataFrame(results)
+    augmented_dataframe = pd.DataFrame(results)
+    return augmented_dataframe
 
 
 def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:

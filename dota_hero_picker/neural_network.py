@@ -12,10 +12,9 @@ class RecommenderWithPositionalAttention(nn.Module):
         self,
         num_heroes: int,
         max_picks: int = 5,
-        embedding_dim: int = 64,
+        embedding_dim: int = 128,
         num_heads: int = 4,
         hidden_sizes: list = [
-            4096,
             4096,
             2048,
             1024,
