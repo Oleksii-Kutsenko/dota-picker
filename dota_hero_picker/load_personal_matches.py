@@ -52,12 +52,13 @@ def read_existing_matches(csv_path):
 
 
 def parse_draft(match, account_id):
-    picks_bans = match.get("picks_bans", [])
-    if not picks_bans:
+    picks_bans = match.get("picks_bans")
+    players = match.get("players")
+
+    if not picks_bans or not players:
         return None
 
     your_player = None
-    players = match.get("players", [])
     for player in players:
         if player.get("account_id") == account_id:
             your_player = player
@@ -65,26 +66,32 @@ def parse_draft(match, account_id):
     if your_player is None:
         return None
 
-    your_hero_id = your_player.get("hero_id")
     your_team = 0 if your_player.get("isRadiant") else 1
-
-    actually_picked_heroes = {player["hero_id"] for player in players}
-    all_picks = [p for p in picks_bans if p["is_pick"]]
-
-    team_picks_sorted = sorted(
-        [p for p in all_picks if p["team"] == your_team],
-        key=lambda x: x["order"],
-    )
-    opponent_picks_sorted = sorted(
-        [p for p in all_picks if p["team"] != your_team],
-        key=lambda x: x["order"],
-    )
-
     win = 1 if match.get("radiant_win") == (your_team == 0) else 0
 
+    team_picks = []
+    opp_picks = []
+    actually_picked_heroes = {player["hero_id"] for player in players}
+    all_picks_sorted = sorted(
+        [
+            p
+            for p in picks_bans
+            if p.get("is_pick") and p["hero_id"] in actually_picked_heroes
+        ],
+        key=lambda p: p["order"],
+    )
+    for pick in all_picks_sorted:
+        hero_id = pick["hero_id"]
+        if pick["team"] == your_team:
+            team_picks.append(hero_id)
+        else:
+            opp_picks.append(hero_id)
+
+    your_hero_id = your_player.get("hero_id")
+
     return {
-        "team_picks": [pick["hero_id"] for pick in team_picks_sorted],
-        "opponent_picks": [pick["hero_id"] for pick in opponent_picks_sorted],
+        "team_picks": team_picks,
+        "opponent_picks": opp_picks,
         "picked_hero": your_hero_id,
         "win": win,
         "match_id": match["match_id"],

@@ -5,3 +5,4 @@ venv
 .streamlit
 .ruff_cache
 __pycache__
+dota_hero_picker/models/*

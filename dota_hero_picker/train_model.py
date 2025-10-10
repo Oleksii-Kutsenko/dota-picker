@@ -1,7 +1,9 @@
+import ast
 import logging
 import os
 import sys
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
@@ -10,13 +12,14 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.base import BaseEstimator
+from sklearn.dummy import DummyClassifier
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import ParameterGrid
+from sklearn.model_selection import ParameterGrid, train_test_split
 from torch import nn, optim
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
@@ -24,13 +27,13 @@ from torch.utils.data import DataLoader, Dataset
 import settings
 
 from .data_preparation import (
+    api_id_2_model_id,
+    create_augmented_dataframe,
     num_heroes,
-    prepare_training_data,
+    prepare_dataframe,
 )
 from .neural_network import (
-    HeroPredictorWithEmbedding,
-    HeroPredictorWithOrder,
-    embedding_dim,
+    RecommenderWithPositionalAttention,
 )
 
 logging.basicConfig(
@@ -43,204 +46,106 @@ logger = logging.getLogger()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class PyTorchEstimator(BaseEstimator):
-    def __init__(
-        self,
-        input_size: int,
-        epochs: int = 10,
-        lr: float = 0.001,
-        batch_size: int = 32,
-        patience: int = 3,
-    ):
-        self.input_size = input_size
-        self.epochs = epochs
-        self.lr = lr
-        self.batch_size = batch_size
-        self.patience = patience
-        self.model = None
-
-    def fit(self, X: list, y: list) -> Self:
-        self.model = HeroPredictorWithOrder(self.input_size)
-        self.model = train_model(
-            self.model,
-            X,
-            y,
-            self.epochs,
-            self.lr,
-            self.batch_size,
-            self.patience,
-        )
-        return self
-
-    def predict(self, X: list) -> np.array:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.eval()
-        with torch.no_grad():
-            inputs = torch.tensor(X, dtype=torch.float32).to(device)
-            outputs = torch.sigmoid(self.model(inputs)).cpu().numpy().flatten()
-        return (outputs > 0.5).astype(int)
-
-    def score(self, X, y):
-        preds = self.predict(X)
-        return accuracy_score(y, preds)
-
-
-def load_decisions_from_csv(csv_file_path: str) -> pd.DataFrame:
+def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
     if not os.path.exists(csv_file_path):
         raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
-    decisions_dataframe = pd.read_csv(
+
+    matches_dataframe = pd.read_csv(
         csv_file_path,
         converters={
-            "full_team_picks": str,
             "team_picks": str,
-            "full_opponent_picks": str,
             "opponent_picks": str,
-            "picked_hero": str,
         },
-        dtype={"win": int},
+        dtype={
+            "win": int,
+            "picked_hero": int,
+        },
     )
     to_split_columns = [
-        "full_team_picks",
         "team_picks",
-        "full_opponent_picks",
         "opponent_picks",
     ]
     for column in to_split_columns:
-        decisions_dataframe[column] = (
-            decisions_dataframe[column].str.strip().str.split(",")
+        matches_dataframe[column] = matches_dataframe[column].apply(
+            ast.literal_eval
         )
+        matches_dataframe[column] = matches_dataframe[column].apply(
+            lambda hero_list: [
+                api_id_2_model_id[api_id] for api_id in hero_list
+            ]
+        )
+    matches_dataframe["picked_hero"] = matches_dataframe["picked_hero"].apply(
+        lambda api_id: api_id_2_model_id[api_id]
+    )
 
-    return decisions_dataframe
+    return matches_dataframe
 
 
 class DotaDataset(Dataset):
-    def __init__(self, features, labels):
-        self.features = features
-        self.labels = torch.tensor(labels, dtype=torch.float32)
+    def __init__(self, dataframe: pd.DataFrame, max_picks_per_team: int = 5):
+        self.dataframe = dataframe
+        self.max_len = max_picks_per_team
 
     def __len__(self):
         """Return dataset length."""
-        return len(self.labels)
+        return len(self.dataframe)
 
-    def __getitem__(self, idx) -> tuple:
+    def __getitem__(self, idx: int) -> tuple:
         """Return training example."""
-        sample = self.features[idx]
-        label = self.labels[idx]
-
+        row = self.dataframe.iloc[idx]
+        team_picks_padded = row["visible_team_picks"] + [0] * (
+            self.max_len - len(row["visible_team_picks"])
+        )
+        opp_picks_padded = row["visible_opp_picks"] + [0] * (
+            self.max_len - len(row["visible_opp_picks"])
+        )
         return (
-            torch.tensor(sample[0], dtype=torch.float32),
-            torch.tensor(sample[1], dtype=torch.float32),
-            torch.tensor(sample[2], dtype=torch.float32),
-            torch.tensor(sample[3], dtype=torch.long),  # synergy pairs
-            torch.tensor(sample[4], dtype=torch.long),  # synergy pairs
-            torch.tensor(sample[5], dtype=torch.long),  # counter pairs
-            torch.tensor(sample[6], dtype=torch.float32),  # aggregate features
-            label,
+            torch.tensor(team_picks_padded, dtype=torch.long),
+            torch.tensor(opp_picks_padded, dtype=torch.long),
+            torch.tensor(row["actual_pick"], dtype=torch.long),
+            torch.tensor(row["win"], dtype=torch.float),
+            torch.tensor(row.get("is_my_decision", 0.0), dtype=torch.float),
         )
 
 
-def collate_fn(batch):
-    (
-        team_vecs,
-        opp_vecs,
-        pick_vecs,
-        team_syns,
-        opp_syns,
-        team_cnts,
-        agg_features,
-        labels,
-    ) = zip(*batch, strict=True)
-
-    team_syns_padded = pad_sequence(
-        team_syns,
-        batch_first=True,
-        padding_value=0,
-    )
-    opp_syns_padded = pad_sequence(opp_syns, batch_first=True, padding_value=0)
-    team_cnts_padded = pad_sequence(
-        team_cnts,
-        batch_first=True,
-        padding_value=0,
-    )
-
-    inputs = [
-        torch.stack(team_vecs),
-        torch.stack(opp_vecs),
-        torch.stack(pick_vecs),
-        team_syns_padded,
-        opp_syns_padded,
-        team_cnts_padded,
-        torch.stack(agg_features),
-    ]
-
-    labels_stacked = torch.stack(labels)
-
-    return inputs, labels_stacked
-
-
-def get_data_loader(x_data: list, y_data: list, batch_size: int) -> DataLoader:
-    dataset = DotaDataset(x_data, y_data)
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        drop_last=True,
-    )
+def get_data_loader(
+    dataset: Dataset, batch_size: int, shuffle: bool = True
+) -> DataLoader:
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
 @dataclass
 class TrainingArguments:
     """Stores data for training."""
 
-    x_train: list
-    y_train: list
-    x_val: list | None
-    y_val: list | None
-
-    pos_weight: torch.Tensor
-    epochs: int = 30
-    lr: float = 0.0003
-    batch_size: int = 32
+    train_dataset: DotaDataset
+    val_dataset: DotaDataset
+    epochs: int = 60
+    lr: float = 0.00001
+    batch_size: int = 64
     patience: int = 3
 
 
 def train_model(
-    model: HeroPredictorWithEmbedding,
+    model: RecommenderWithPositionalAttention,
     training_arguments: TrainingArguments,
-) -> HeroPredictorWithEmbedding:
+) -> RecommenderWithPositionalAttention:
     model.to(device)
 
-    criterion = nn.BCEWithLogitsLoss(pos_weight=training_arguments.pos_weight)
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=training_arguments.lr,
-        weight_decay=1e-4,
-    )
+    criterion = nn.CrossEntropyLoss(reduction="none")
+    optimizer = optim.AdamW(model.parameters(), lr=training_arguments.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        "min",
-        patience=2,
-        factor=0.1,
+        optimizer, "min", patience=3, factor=0.5
     )
-    mid_point = 0.5
 
     train_loader = get_data_loader(
-        training_arguments.x_train,
-        training_arguments.y_train,
-        training_arguments.batch_size,
+        training_arguments.train_dataset, training_arguments.batch_size
     )
-
-    val_loader = None
-    if (
-        training_arguments.x_val is not None
-        and training_arguments.y_val is not None
-    ):
-        val_loader = get_data_loader(
-            training_arguments.x_val,
-            training_arguments.y_val,
-            training_arguments.batch_size,
-        )
+    val_loader = get_data_loader(
+        training_arguments.val_dataset,
+        training_arguments.batch_size,
+        shuffle=False,
+    )
 
     best_val_loss = float("inf")
     patience_counter = 0
@@ -248,252 +153,191 @@ def train_model(
 
     for epoch in range(training_arguments.epochs):
         model.train()
-        train_loss = 0
-        train_preds: list[torch.Tensor] = []
-        train_labels: list[torch.Tensor] = []
+        epoch_train_loss = 0.0
+        epoch_train_preds = []
+        epoch_train_labels = []
 
-        for batch_inputs, batch_labels in train_loader:
-            inputs = [t.to(device) for t in batch_inputs]
-            labels = batch_labels.to(device)
+        for batch_data in train_loader:
+            team_picks, opp_picks, targets, is_win, is_my_decision = [
+                t.to(device) for t in batch_data
+            ]
 
             optimizer.zero_grad()
-            outputs = model(*inputs)
-            loss = criterion(outputs, labels.unsqueeze(1))
+            outputs = model(team_picks, opp_picks)
+            per_sample_loss = criterion(outputs, targets)
+
+            weights = torch.ones_like(per_sample_loss)
+            weights += is_win * 1.0
+            weights += (is_win * is_my_decision) * 2.0
+
+            loss = (per_sample_loss * weights).mean()
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            train_loss += loss.item()
 
-            preds = (
-                (torch.sigmoid(outputs) > mid_point)
-                .float()
-                .detach()
-                .cpu()
-                .numpy()
-            )
-            train_preds.extend(preds)
-            train_labels.extend(labels.detach().cpu().numpy())
+            epoch_train_loss += loss.item()
+            predicted_classes = torch.argmax(outputs, dim=1)
+            epoch_train_preds.extend(predicted_classes.cpu().numpy())
+            epoch_train_labels.extend(targets.cpu().numpy())
 
-        avg_train_loss = train_loss / len(train_loader)
-        train_acc = accuracy_score(train_labels, train_preds)
-        train_prec = precision_score(train_labels, train_preds)
-        train_rec = recall_score(train_labels, train_preds)
-        train_f1 = f1_score(train_labels, train_preds)
-
-        logger.info(
-            f"Epoch {epoch + 1}/{training_arguments.epochs} - "
-            f"Train Loss: {avg_train_loss:.4f}, "
-            f"Acc: {train_acc:.4f}, "
-            f"Prec: {train_prec:.4f}, "
-            f"Rec: {train_rec:.4f}, "
-            f"F1: {train_f1:.4f}",
+        avg_train_loss = epoch_train_loss / len(train_loader)
+        train_acc = accuracy_score(epoch_train_labels, epoch_train_preds)
+        train_prec = precision_score(
+            epoch_train_labels,
+            epoch_train_preds,
+            average="weighted",
+            zero_division=0,
+        )
+        train_rec = recall_score(
+            epoch_train_labels,
+            epoch_train_preds,
+            average="weighted",
+            zero_division=0,
+        )
+        train_f1 = f1_score(
+            epoch_train_labels,
+            epoch_train_preds,
+            average="weighted",
+            zero_division=0,
         )
 
-        if val_loader is not None and training_arguments.x_val is not None:
-            val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate_model(
-                model,
-                val_loader,
-                criterion,
-            )
-            scheduler.step(val_loss)
-            logger.info(
-                f"Val Loss: {val_loss:.4f}, "
-                f"Acc: {val_acc:.4f}, "
-                f"Prec: {val_prec:.4f}, "
-                f"Rec: {val_rec:.4f}, "
-                f"F1: {val_f1:.4f}",
-            )
+        logger.info(
+            f"Epoch {epoch + 1}/{training_arguments.epochs} | "
+            f"Train Loss: {avg_train_loss:.4f} | Acc: {train_acc:.4f} | "
+            f"Prec: {train_prec:.4f} | Rec: {train_rec:.4f} | F1: {train_f1:.4f}"
+        )
 
-            # Early stopping
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-                best_weights = model.state_dict()
-            else:
-                patience_counter += 1
-                if patience_counter >= training_arguments.patience:
-                    logger.info("Early stopping triggered.")
-                    break
-
-    if training_arguments.x_val is not None and best_weights is not None:
-        model.load_state_dict(best_weights)
         val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate_model(
-            model,
-            val_loader,
-            criterion,
+            model, val_loader, nn.CrossEntropyLoss()
         )
+        scheduler.step(val_loss)
+
         logger.info(
-            f"Final Validation - Loss: {val_loss:.4f}, "
-            f"Acc: {val_acc:.4f}, "
-            f"Prec: {val_prec:.4f}, "
-            f"Rec: {val_rec:.4f}, "
-            f"F1: {val_f1:.4f}",
+            f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | "
+            f"Val Prec: {val_prec:.4f} | Val Rec: {val_rec:.4f} | Val F1: {val_f1:.4f}"
         )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            best_weights = deepcopy(model.state_dict())
+            logger.info(
+                f"New best validation loss: {best_val_loss:.4f}. Saving model weights."
+            )
+        else:
+            patience_counter += 1
+            if patience_counter >= training_arguments.patience:
+                logger.info(
+                    f"Early stopping triggered after {patience_counter} epochs of no improvement."
+                )
+                break
+
+    if best_weights:
+        model.load_state_dict(best_weights)
+        logger.info(
+            f"Loaded best model weights (val_loss: {best_val_loss:.4f}) for final use."
+        )
+
     return model
 
 
 def evaluate_model(
-    model: HeroPredictorWithEmbedding,
+    model: RecommenderWithPositionalAttention,
     loader: DataLoader[list[torch.Tensor]],
     criterion: nn.BCEWithLogitsLoss,
 ) -> tuple[float, float, float, float, float]:
     model.eval()
-    val_loss = 0
-    mid_point = 0.5
-    preds: list[np.ndarray] = []
-    labels_list = []
+    total_val_loss = 0.0
+    all_preds: list = []
+    all_labels: list = []
+
     with torch.no_grad():
-        for batch_inputs, batch_labels in loader:
-            inputs = [t.to(device) for t in batch_inputs]
-            labels = batch_labels.to(device)
+        for batch_data in loader:
+            team_picks, opp_picks, targets, _, _ = [
+                t.to(device) for t in batch_data
+            ]
 
-            outputs = model(*inputs)
+            outputs = model(team_picks, opp_picks)
+            loss = criterion(outputs, targets)
 
-            loss = criterion(outputs, labels.unsqueeze(1))
-            val_loss += loss.item()
+            total_val_loss += loss.item()
 
-            pred = (torch.sigmoid(outputs) > mid_point).float().cpu().numpy()
-            preds.extend(pred)
-            labels_list.extend(labels.cpu().numpy())
+            preds = torch.argmax(outputs, dim=1).cpu().numpy()
 
-    avg_val_loss = val_loss / len(loader)
-    acc: float = accuracy_score(labels_list, preds)
-    prec: float = precision_score(labels_list, preds, zero_division=0)
-    rec: float = recall_score(labels_list, preds, zero_division=0)
-    f1: float = f1_score(labels_list, preds, zero_division=0)
+            all_preds.extend(preds)
+            all_labels.extend(targets.cpu().numpy())
+
+    avg_val_loss = total_val_loss / len(loader)
+
+    acc = accuracy_score(all_labels, all_preds)
+    prec = precision_score(
+        all_labels, all_preds, average="weighted", zero_division=0
+    )
+    rec = recall_score(
+        all_labels, all_preds, average="weighted", zero_division=0
+    )
+    f1 = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
+
     return avg_val_loss, acc, prec, rec, f1
 
 
 def compute_baseline_f1(
-    y_train: list[str],
-    y_val: list[str],
-) -> tuple[float, str, dict[str, float], dict[str, float]]:
-    # Determine majority class from training data
-    counter = Counter(y_train)
-    majority_class = counter.most_common(1)[0][0]
-
-    # Predict majority class for all validation samples
-    y_pred_baseline = [majority_class] * len(y_val)
-
-    # Compute F1-score for the baseline (using pos_label=1 for win prediction)
-    baseline_f1: float = f1_score(y_val, y_pred_baseline, pos_label=1)
-
-    # Also compute class distribution for context
-    train_dist = {k: v / len(y_train) for k, v in counter.items()}
-    val_counter = Counter(y_val)
-    val_dist = {k: v / len(y_val) for k, v in val_counter.items()}
-
-    return baseline_f1, majority_class, train_dist, val_dist
-
-
-def optimize_hyperparameters(
-    x_train: list[
-        tuple[
-            list[int],
-            list[int],
-            list[int],
-            list[int],
-            list[int],
-            list[int],
-            list[float | int],
-        ]
-    ],
-    y_train: list[int],
-    x_val: list[
-        tuple[
-            list[int],
-            list[int],
-            list[int],
-            list[int],
-            list[int],
-            list[int],
-            list[float | int],
-        ]
-    ],
-    y_val: list[int],
-) -> HeroPredictorWithEmbedding:
-    param_grid = {
-        "epochs": [10, 20, 30],
-        "lr": [0.001, 0.01, 0.1],
-        "batch_size": [32, 64, 128],
-        "patience": [4, 5, 6],
-    }
-
-    best_f1 = -1
-    best_params = None
-    best_model: HeroPredictorWithEmbedding | None = None
-
-    for params in ParameterGrid(param_grid):
-        logger.info(f"Testing params: {params}")
-        estimator = PyTorchEstimator(**params)
-        estimator.fit(x_train, y_train)
-        val_pred = estimator.predict(x_val)
-        val_f1 = f1_score(y_val, val_pred)
-        logger.info(f"Validation F1: {val_f1:.4f}")
-
-        if val_f1 > best_f1:
-            best_f1 = val_f1
-            best_params = params
-            best_model = estimator.model
-
-    logger.info(f"Best params: {best_params} with F1: {best_f1:.4f}")
-    if best_model is None:
-        error_msg = "Best Model is None"
-        raise RuntimeError(error_msg)
-    return best_model
-
-
-def compute_pos_weight(decision_dataframe: pd.DataFrame) -> torch.Tensor:
-    num_of_positives = len(decision_dataframe[decision_dataframe["win"] == 1])
-    num_of_negatives = len(decision_dataframe) - num_of_positives
-    pos_weight = torch.tensor([num_of_negatives / num_of_positives]).to(device)
-    logger.info("Class distribution for original data")
-    logger.info(f"Number of Wins {num_of_positives}")
-    logger.info(f"Number of Loses {num_of_negatives}")
-    logger.info(f"Pos Weight {pos_weight}")
-    return pos_weight
+    y_train: pd.Series,
+    y_val: pd.Series,
+) -> tuple[
+    float,
+    int,
+]:
+    baseline_model = DummyClassifier(strategy="most_frequent")
+    baseline_model.fit(pd.DataFrame(index=y_train.index), y_train)
+    y_pred_baseline = baseline_model.predict(pd.DataFrame(index=y_val.index))
+    f1 = f1_score(y_val, y_pred_baseline, average="weighted", zero_division=0)
+    majority_class = int(baseline_model.classes_[0])
+    return f1, majority_class
 
 
 def main(csv_file_path: str) -> None:
     """Model training entrypoint."""
-    decision_dataframe = load_decisions_from_csv(csv_file_path)
-    # TODO: Continue here split before preparation, augment for training data
-    pos_weight = compute_pos_weight(decision_dataframe)
+    matches_dataframe = load_personal_matches(csv_file_path)
 
-    x_train, x_val, y_train, y_val = prepare_training_data(decision_dataframe)
-    logger.info(
-        f"Loaded {len(decision_dataframe)} decisions "
-        f"(Train: {len(x_train)}, Val: {len(x_val)}).",
+    train_dataframe, tmp_dataframe = train_test_split(
+        matches_dataframe, test_size=0.2, stratify=matches_dataframe["win"]
     )
+    validation_dataframe, test_dataframe = train_test_split(
+        tmp_dataframe, test_size=0.5, stratify=tmp_dataframe["win"]
+    )
+    augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
+    prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
+    prepared_test_dataframe = prepare_dataframe(test_dataframe)
 
-    # Compute and print baseline F1-score
-    baseline_f1, majority_class, train_dist, val_dist = compute_baseline_f1(
-        y_train,
-        y_val,
+    baseline_f1, majority_class = compute_baseline_f1(
+        augmented_train_dataframe["actual_pick"],
+        prepared_test_dataframe["actual_pick"],
     )
     logger.info(
         "Baseline F1-score "
         f"(always predict majority class {majority_class}): "
         f"{baseline_f1:.4f}",
     )
-    logger.info("Training class distribution: %s", train_dist)
-    logger.info("Validation class distribution: %s", val_dist)
 
-    model = HeroPredictorWithEmbedding(num_heroes, embedding_dim)
+    train_dataset = DotaDataset(augmented_train_dataframe)
+    val_dataset = DotaDataset(prepared_validation_dataframe)
+    test_dataset = DotaDataset(prepared_test_dataframe)
+
+    model = RecommenderWithPositionalAttention(num_heroes)
 
     training_arguments = TrainingArguments(
-        x_train=x_train,
-        y_train=y_train,
-        x_val=x_val,
-        y_val=y_val,
-        pos_weight=pos_weight,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
     )
-    model = train_model(
+
+    trained_model = train_model(
         model,
         training_arguments,
     )
     torch.save(
-        model.state_dict(),
+        trained_model.state_dict(),
         settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
     )
     logger.info(

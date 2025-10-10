@@ -6,10 +6,7 @@ import settings
 import streamlit as st
 from dota_hero_picker.data_preparation import create_input_vector
 from dota_hero_picker.load_personal_matches import get_hero_data
-from dota_hero_picker.neural_network import HeroPredictorWithEmbedding
-from dota_hero_picker.train_model import (
-    embedding_dim,
-)
+from dota_hero_picker.neural_network import RecommenderWithPositionalAttention
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -221,9 +218,8 @@ st.title("Dota Picker Web UI")
 model_path = settings.MODELS_FOLDER_PATH / Path("trained_model.pth")
 
 if model_path.exists():
-    model = HeroPredictorWithEmbedding(
+    model = RecommenderWithPositionalAttention(
         num_heroes,
-        embedding_dim,
     )
     model.load_state_dict(torch.load(model_path))
     model.to(device)
@@ -261,9 +257,8 @@ def on_opponent_change() -> None:
     ]
 
 
-team_options = heroes
+team_options = [h for h in heroes if h not in st.session_state.opponent_picks]
 opponent_options = [h for h in heroes if h not in st.session_state.team_picks]
-
 team_picks = st.multiselect(
     "Your Team Picks (up to 5)",
     options=team_options,

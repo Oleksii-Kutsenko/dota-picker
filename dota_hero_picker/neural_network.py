@@ -7,48 +7,110 @@ from .data_preparation import (
 )
 
 
-class HeroEmbeddingPredictor(nn.Module):
+class RecommenderWithPositionalAttention(nn.Module):
     def __init__(
         self,
         num_heroes: int,
-        embed_dim=64,
-        dropout_rate=0.1,
+        max_picks: int = 5,
+        embedding_dim: int = 64,
+        num_heads: int = 4,
+        hidden_sizes: list = [
+            4096,
+            4096,
+            2048,
+            1024,
+            512,
+            256,
+        ],
+        dropout_rate: float = 0.2,
     ):
         super().__init__()
-        self.num_heroes = num_heroes
-        self.embed_dim = embed_dim
 
-        self.hero_emb = nn.Embedding(num_heroes, embed_dim, padding_idx=0)
-        nn.init.kaiming_normal_(
-            self.hero_emb.weight, mode="fan_in", nonlinearity="relu"
+        self.hero_emb = nn.Embedding(
+            num_heroes + 1, embedding_dim, padding_idx=0
         )
 
+        self.positional_emb = nn.Embedding(max_picks, embedding_dim)
+        self.attention = nn.MultiheadAttention(
+            embed_dim=embedding_dim,
+            num_heads=num_heads,
+            dropout=dropout_rate,
+            batch_first=True,
+        )
+        self.layernorm1 = nn.LayerNorm(embedding_dim)
         self.dropout = nn.Dropout(dropout_rate)
-        self.head = nn.Sequential(
-            nn.Linear(2 * embed_dim, 64),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(64, 1),
+
+        layers = []
+        input_size = 2 * embedding_dim
+        for size in hidden_sizes:
+            layers.append(nn.Linear(input_size, size))
+            layers.append(nn.LayerNorm(size))
+            layers.append(nn.GELU())
+            layers.append(nn.Dropout(dropout_rate))
+            input_size = size
+        self.network = nn.Sequential(*layers)
+        self.output_layer = nn.Linear(input_size, num_heroes + 1)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
+            elif isinstance(module, (nn.LayerNorm, nn.BatchNorm1d)):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.Embedding):
+                nn.init.xavier_uniform_(module.weight)
+
+    def _get_attention_context(self, hero_ids: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len = hero_ids.size()
+        padding_mask = hero_ids == 0
+
+        position_ids = torch.arange(
+            seq_len, dtype=torch.long, device=hero_ids.device
+        )
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+
+        final_embeds = self.hero_emb(hero_ids) + self.positional_emb(
+            position_ids
+        )
+        final_embeds = self.dropout(final_embeds)
+
+        normed_embeds = self.layernorm1(final_embeds)
+
+        is_fully_masked = padding_mask.all(dim=1)
+
+        safe_padding_mask = padding_mask.clone()
+        safe_padding_mask[is_fully_masked] = False
+
+        attn_output, _ = self.attention(
+            normed_embeds,
+            normed_embeds,
+            normed_embeds,
+            key_padding_mask=safe_padding_mask,
         )
 
-    def _team_embedding(self, hero_ids):
-        embeds = self.hero_emb(hero_ids.clamp(0, self.num_heroes - 1))
+        attn_output[is_fully_masked] = 0.0
 
-        mask = (hero_ids != 0).float().unsqueeze(-1)
-        masked = embeds * mask
-        summed = masked.sum(dim=1)
+        context_embeds = final_embeds + self.dropout(attn_output)
+
+        mask = (~padding_mask).float().unsqueeze(-1)
+
+        summed_context = (context_embeds * mask).sum(dim=1)
         counts = mask.sum(dim=1).clamp(min=1)
+        pooled_context = summed_context / counts
 
-        avg = summed / counts
-        return self.dropout(avg)
+        return pooled_context
 
-    def forward(self, team_hero_ids, opp_hero_ids):
-        team_avg = self._team_embedding(team_hero_ids)
-        opp_avg = self._team_embedding(opp_hero_ids)
-
-        combined = torch.cat([team_avg, opp_avg], dim=1)
-        logits = self.head(combined).squeeze(1)
-
+    def forward(
+        self, team_hero_ids: torch.Tensor, opp_hero_ids: torch.Tensor
+    ) -> torch.Tensor:
+        team_context = self._get_attention_context(team_hero_ids)
+        opp_context = self._get_attention_context(opp_hero_ids)
+        draft_context = torch.cat([team_context, opp_context], dim=1)
+        features = self.network(draft_context)
+        logits = self.output_layer(features)
         return logits
 
 
@@ -58,7 +120,7 @@ class HeroPredictorWithEmbedding(nn.Module):
         num_heroes: int,
         embedding_dim=embedding_dim,
         hidden_sizes=[2048, 1024, 512, 256, 128, 64, 32],
-        dropout_rate=0.3,
+        dropout_rate=0.1,
         fm_embedding_size=32,
     ):
         super().__init__()

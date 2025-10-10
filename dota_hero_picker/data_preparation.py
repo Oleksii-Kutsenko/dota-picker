@@ -13,17 +13,23 @@ import settings
 from .load_personal_matches import get_hero_data
 
 logger = logging.getLogger(__name__)
-synergy = pd.read_csv(settings.MATCHUPS_STATISTICS_PATH / Path("synergy.csv"))
-counters = pd.read_csv(
-    settings.MATCHUPS_STATISTICS_PATH / Path("counters.csv")
-)
 
 hero_data = get_hero_data()
-heroes = [hero_data_item["localized_name"] for hero_data_item in hero_data]
-num_heroes = len(heroes)
-hero_to_id = {hero: idx for idx, hero in enumerate(heroes)}
-id_to_hero = {idx: hero for hero, idx in hero_to_id.items()}
+hero_names = []
+hero_name_2_model_id = {}
+model_id_2_hero_name = {}
+api_id_2_model_id = {}
+num_heroes = len(hero_data)
+for model_id, hero in enumerate(hero_data, 1):
+    hero_name = hero["localized_name"]
+    api_hero_id = hero["id"]
+    hero_names.append(hero_name)
+    hero_name_2_model_id[hero_name] = model_id
+    model_id_2_hero_name[model_id] = hero_name
+    api_id_2_model_id[api_hero_id] = model_id
+
 embedding_dim = 32
+visibility_map = [0, 0, 2, 2, 4]
 
 
 def create_input_vector(
@@ -53,137 +59,73 @@ def create_input_vector(
     )
 
 
-def augment_decision_samples(decision, create_input_vector):
-    (
-        full_team_picks,
-        team_picks,
-        full_opponent_picks,
-        opponent_picks,
-        picked_hero,
-        win,
-    ) = decision
+def create_augmented_dataframe(train_dataframe):
+    results = []
+    for _, row in train_dataframe.iterrows():
+        team_picks = row.team_picks
+        opp_picks = row.opponent_picks
+        my_pick = row.picked_hero
+        win = row.win
 
-    augmented_samples = []
+        for i in range(len(team_picks)):
+            actual_pick = team_picks[i]
+            visible_team_picks = team_picks[:i]
+            visible_opp_picks = opp_picks[
+                : min(visibility_map[i], len(opp_picks) - 1)
+            ]
+            is_my_decision = True if my_pick == actual_pick else False
+            results.append(
+                {
+                    "visible_team_picks": visible_team_picks,
+                    "visible_opp_picks": visible_opp_picks,
+                    "actual_pick": actual_pick,
+                    "win": win,
+                    "is_my_decision": is_my_decision,
+                }
+            )
 
-    own_picks_list = [pick for pick in full_team_picks]
-    enemy_picks_list = [pick for pick in full_opponent_picks]
+        team_picks = row.opponent_picks
+        opp_picks = row.team_picks
+        win = 1 - row.win
 
-    total_own = len(own_picks_list)
-    total_enemy = len(enemy_picks_list)
+        for i in range(len(team_picks)):
+            actual_pick = team_picks[i]
+            visible_team_picks = team_picks[:i]
+            visible_opp_picks = opp_picks[
+                : min(visibility_map[i], len(opp_picks) - 1)
+            ]
+            results.append(
+                {
+                    "visible_team_picks": visible_team_picks,
+                    "visible_opp_picks": visible_opp_picks,
+                    "actual_pick": actual_pick,
+                    "win": win,
+                    "is_my_decision": False,
+                }
+            )
 
-    # Your team's perspective: Cumulative with phased opponent inclusion
-    for i in range(total_own):
-        # Cumulative own picks up to but not including current (prior knowledge)
-        prior_own_picks = own_picks_list[:i]
+    return pd.DataFrame(results)
 
-        # Phased opponent picks: Simulate Dota phases (empty early, then add)
-        if i == 0:
-            prior_enemy_picks = []  # No opponents visible yet
-        elif i <= 2:
-            prior_enemy_picks = enemy_picks_list[
-                : min(2, total_enemy)
-            ]  # Early phase: up to 2
-        else:
-            prior_enemy_picks = enemy_picks_list[
-                : min(4, total_enemy)
-            ]  # Later: up to 4
 
-        # Actual pick is the current one
-        actual_pick = own_picks_list[i]
-
-        vec = create_input_vector(
-            prior_own_picks, prior_enemy_picks, actual_pick
+def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+    dataframe = dataframe[
+        ["team_picks", "opponent_picks", "picked_hero", "win"]
+    ]
+    prepared_rows = []
+    for _, row in dataframe.iterrows():
+        my_pick_index = row.team_picks.index(row.picked_hero)
+        visible_team_picks = row.team_picks[:my_pick_index]
+        visible_opp_picks = row.opponent_picks[
+            : min(visibility_map[my_pick_index], len(row.opponent_picks) - 1)
+        ]
+        prepared_rows.append(
+            {
+                "visible_team_picks": visible_team_picks,
+                "visible_opp_picks": visible_opp_picks,
+                "actual_pick": row.picked_hero,
+                "win": row.win,
+                "is_my_decision": True,
+            }
         )
-        augmented_samples.append((vec, win))
 
-    # Opponent's perspective: Swap and invert win
-    inverted_win = 1 - win
-    own_picks_list_inv = enemy_picks_list
-    enemy_picks_list_inv = own_picks_list
-    total_own_inv = len(own_picks_list_inv)
-    total_enemy_inv = len(enemy_picks_list_inv)
-
-    for i in range(total_own_inv):
-        prior_own_picks = own_picks_list_inv[:i]
-
-        if i == 0:
-            prior_enemy_picks = []
-        elif i <= 2:
-            prior_enemy_picks = enemy_picks_list_inv[: min(2, total_enemy_inv)]
-        else:
-            prior_enemy_picks = enemy_picks_list_inv[: min(4, total_enemy_inv)]
-
-        actual_pick = own_picks_list_inv[i]
-
-        vec = create_input_vector(
-            prior_own_picks, prior_enemy_picks, actual_pick
-        )
-        augmented_samples.append((vec, inverted_win))
-
-    return augmented_samples
-
-
-def stratified_split(
-    x,
-    y,
-    test_size=0.2,
-):
-    # Group indices by label for stratification
-    label_to_indices = defaultdict(list)
-    for idx, label in enumerate(y):
-        label_to_indices[label].append(idx)
-
-    train_indices = []
-    val_indices = []
-    for indices in label_to_indices.values():
-        random.shuffle(indices)
-        split_point = int(len(indices) * (1 - test_size))
-        train_indices.extend(indices[:split_point])
-        val_indices.extend(indices[split_point:])
-
-    # Shuffle final indices for randomness
-    random.shuffle(train_indices)
-    random.shuffle(val_indices)
-
-    return train_indices, val_indices
-
-
-def prepare_training_data(
-    decisions: pd.DataFrame,
-    test_size: float = 0.2,
-) -> tuple[list, list, list, list]:
-    x = []
-    y = []
-
-    for _, row in decisions.iterrows():
-        breakpoint()
-        input_vec = create_input_vector(
-            row.team_picks, row.opponent_picks, row.picked_hero
-        )
-        x.append(input_vec)
-        y.append(row.win)
-
-        augmented = augment_decision_samples(
-            (
-                row.full_team_picks,
-                row.team_picks,
-                row.full_opponent_picks,
-                row.opponent_picks,
-                row.picked_hero,
-                row.win,
-            ),
-            create_input_vector,
-        )
-        for sample_vec, label in augmented:
-            x.append(sample_vec)
-            y.append(label)
-
-    logger.info(f"Augmented dataset size before split: {len(x)}")
-
-    train_index, val_index = stratified_split(x, y, test_size=test_size)
-    x_train = [x[i] for i in train_index]
-    x_val = [x[i] for i in val_index]
-    y_train = [y[i] for i in train_index]
-    y_val = [y[i] for i in val_index]
-
-    return x_train, x_val, y_train, y_val
+    return pd.DataFrame(prepared_rows)

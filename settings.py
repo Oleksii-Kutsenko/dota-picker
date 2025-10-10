@@ -8,6 +8,6 @@ MATCHUPS_STATISTICS_PATH = Path("dota_hero_picker") / Path(
     "matchups_statistics",
 )
 PERSONAL_DOTA_MATCHES_PATH = (
-    Path("dota_hero_picker") / Path("matches") / Path("dota_decisions.csv")
+    Path("dota_hero_picker") / Path("matches") / Path("personal_matches.csv")
 )
 MODELS_FOLDER_PATH = Path("dota_hero_picker") / Path("models")
