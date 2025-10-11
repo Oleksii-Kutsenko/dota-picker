@@ -4,9 +4,11 @@ import torch
 
 import settings
 import streamlit as st
-from dota_hero_picker.data_preparation import create_input_vector
+from dota_hero_picker.data_preparation import (
+    hero_name_2_model_id,
+)
 from dota_hero_picker.load_personal_matches import get_hero_data
-from dota_hero_picker.neural_network import RecommenderWithPositionalAttention
+from dota_hero_picker.neural_network import WinPredictorWithPositionalAttention
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -144,19 +146,40 @@ heroes = [hero_data_item["localized_name"] for hero_data_item in hero_data]
 num_heroes = len(heroes)
 hero_to_id = {hero: idx for idx, hero in enumerate(heroes)}
 id_to_hero = {idx: hero for hero, idx in hero_to_id.items()}
+max_picks = 5
+
+
+def pad_hero_ids(hero_names: list[str], max_picks: int = 5) -> list[int]:
+    ids = [hero_to_id.get(name, 0) for name in hero_names]  # 0 if invalid
+    padded = ids + [0] * (max_picks - len(ids))
+    return padded[:max_picks]
 
 
 def suggest_best_picks(
-    model: HeroPredictorWithEmbedding,
+    model: WinPredictorWithPositionalAttention,
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],
-    top_n: int = 100,
+    top_n: int = 10,
 ) -> list[tuple[str, float]]:
     model.eval()
     suggestions = []
 
+    # Baseline: team without new pick
+    team_ids = pad_hero_ids(team_picks)
+    opp_ids = pad_hero_ids(opponent_picks)
+    team_tensor = torch.tensor([team_ids], dtype=torch.long, device=device)
+    opp_tensor = torch.tensor([opp_ids], dtype=torch.long, device=device)
+
     with torch.no_grad():
+        baseline_prob = torch.sigmoid(
+            model(
+                team_tensor,
+                opp_tensor,
+                torch.tensor([0], dtype=torch.long, device=device),
+            ),
+        ).item()
+
         for candidate_hero in heroes:
             if (
                 candidate_hero in team_picks
@@ -167,47 +190,21 @@ def suggest_best_picks(
             if not set(hero_pos) & set(allowed_positions):
                 continue
 
-            (
-                team_vec,
-                opp_vec,
-                pick_vec,
-                team_syn,
-                opp_syn,
-                team_cnt,
-                agg_features,
-            ) = create_input_vector(team_picks, opponent_picks, candidate_hero)
+            candidate_id = hero_name_2_model_id.get(candidate_hero, 0)
+            if candidate_id == 0:
+                continue  # Skip invalid heroes
 
-            team_vec_t = torch.tensor(team_vec, dtype=torch.float32).unsqueeze(
-                0,
+            actual_pick_tensor = torch.tensor(
+                [candidate_id],
+                dtype=torch.long,
+                device=device,
             )
-            opp_vec_t = torch.tensor(opp_vec, dtype=torch.float32).unsqueeze(0)
-            pick_vec_t = torch.tensor(pick_vec, dtype=torch.float32).unsqueeze(
-                0,
-            )
+            prob = torch.sigmoid(
+                model(team_tensor, opp_tensor, actual_pick_tensor),
+            ).item()
+            delta = prob - baseline_prob
 
-            team_syn_t = torch.tensor(team_syn, dtype=torch.long).unsqueeze(0)
-            opp_syn_t = torch.tensor(opp_syn, dtype=torch.long).unsqueeze(0)
-            team_cnt_t = torch.tensor(team_cnt, dtype=torch.long).unsqueeze(0)
-
-            agg_features_t = torch.tensor(
-                agg_features,
-                dtype=torch.float32,
-            ).unsqueeze(0)
-
-            inputs = [
-                team_vec_t.to(device),
-                opp_vec_t.to(device),
-                pick_vec_t.to(device),
-                team_syn_t.to(device),
-                opp_syn_t.to(device),
-                team_cnt_t.to(device),
-                agg_features_t.to(device),
-            ]
-
-            output = model(*inputs)
-            prob = torch.sigmoid(output)[0].item()
-
-            suggestions.append((candidate_hero, prob))
+            suggestions.append((candidate_hero, delta))
 
     suggestions.sort(key=lambda x: x[1], reverse=True)
     return suggestions[:top_n]
@@ -218,11 +215,12 @@ st.title("Dota Picker Web UI")
 model_path = settings.MODELS_FOLDER_PATH / Path("trained_model.pth")
 
 if model_path.exists():
-    model = RecommenderWithPositionalAttention(
+    model = WinPredictorWithPositionalAttention(
         num_heroes,
     )
     model.load_state_dict(torch.load(model_path))
     model.to(device)
+    model.eval()
     st.success(f"Model loaded from {model_path}.")
 else:
     st.error(

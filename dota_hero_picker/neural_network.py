@@ -7,7 +7,7 @@ from .data_preparation import (
 )
 
 
-class RecommenderWithPositionalAttention(nn.Module):
+class WinPredictorWithPositionalAttention(nn.Module):
     def __init__(
         self,
         num_heroes: int,
@@ -40,7 +40,7 @@ class RecommenderWithPositionalAttention(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
 
         layers = []
-        input_size = 2 * embedding_dim
+        input_size = 3 * embedding_dim
         for size in hidden_sizes:
             layers.append(nn.Linear(input_size, size))
             layers.append(nn.LayerNorm(size))
@@ -48,7 +48,7 @@ class RecommenderWithPositionalAttention(nn.Module):
             layers.append(nn.Dropout(dropout_rate))
             input_size = size
         self.network = nn.Sequential(*layers)
-        self.output_layer = nn.Linear(input_size, num_heroes + 1)
+        self.output_layer = nn.Linear(input_size, 1)
 
         self._initialize_weights()
 
@@ -62,14 +62,11 @@ class RecommenderWithPositionalAttention(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.xavier_uniform_(module.weight)
 
-    def _get_attention_context(self, hero_ids: torch.Tensor) -> torch.Tensor:
+    def _get_attention_context(
+        self, hero_ids: torch.Tensor, position_ids: torch.Tensor
+    ) -> torch.Tensor:
         batch_size, seq_len = hero_ids.size()
         padding_mask = hero_ids == 0
-
-        position_ids = torch.arange(
-            seq_len, dtype=torch.long, device=hero_ids.device
-        )
-        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
 
         final_embeds = self.hero_emb(hero_ids) + self.positional_emb(
             position_ids
@@ -103,13 +100,37 @@ class RecommenderWithPositionalAttention(nn.Module):
         return pooled_context
 
     def forward(
-        self, team_hero_ids: torch.Tensor, opp_hero_ids: torch.Tensor
+        self,
+        team_hero_ids: torch.Tensor,
+        opp_hero_ids: torch.Tensor,
+        actual_pick_ids: torch.Tensor,
     ) -> torch.Tensor:
-        team_context = self._get_attention_context(team_hero_ids)
-        opp_context = self._get_attention_context(opp_hero_ids)
-        draft_context = torch.cat([team_context, opp_context], dim=1)
+        batch_size = team_hero_ids.size(0)
+        seq_len = team_hero_ids.size(1)
+        team_pos = (
+            torch.arange(
+                seq_len, dtype=torch.long, device=team_hero_ids.device
+            )
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
+        opp_pos = team_pos.clone()
+
+        num_visible_team = (team_hero_ids != 0).sum(dim=1)
+        actual_pick_pos = num_visible_team.unsqueeze(1)
+        actual_hero_seq = actual_pick_ids.unsqueeze(1)
+
+        team_context = self._get_attention_context(team_hero_ids, team_pos)
+        opp_context = self._get_attention_context(opp_hero_ids, opp_pos)
+        actual_context = self._get_attention_context(
+            actual_hero_seq, actual_pick_pos
+        )
+
+        draft_context = torch.cat(
+            [team_context, opp_context, actual_context], dim=1
+        )
         features = self.network(draft_context)
-        logits = self.output_layer(features)
+        logits = self.output_layer(features).squeeze(-1)
         return logits
 
 
