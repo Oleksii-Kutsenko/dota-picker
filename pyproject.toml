@@ -18,11 +18,11 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
+  "click>=8.3,<9",
   "pandas>=2.3.3,<3",
-  "click (>=8.3.0,<9.0.0)",
-  "torch (>=2.8.0,<3.0.0)",
-  "scikit-learn (>=1.7.2,<2.0.0)",
-  "streamlit (>=1.50.0,<2.0.0)",
+  "scikit-learn>=1.7.2,<2",
+  "streamlit>=1.50,<2",
+  "torch>=2.8,<3",
 ]
 
 [dependency-groups]
@@ -563,7 +563,7 @@ contextmanager-decorators = [ "contextlib.contextmanager" ]
 # List of members which are set dynamically and missed by pylint inference
 # system, and so shouldn't trigger E1101 when accessed. Python regular
 # expressions are accepted.
-# generated-members =
+generated-members = [  ]
 
 # Tells whether missing members accessed in mixin class should be ignored. A
 # class is considered mixin if its name matches the mixin-class-rgx option.
@@ -590,7 +590,7 @@ ignored-checks-for-mixins = [
 # List of class names for which member attributes should not be checked (useful
 # for classes with dynamically set attributes). This supports the use of
 # qualified names.
-ignored-classes = [ "optparse.Values", "thread._local", "_thread._local", "argparse.Namespace" ]
+ignored-classes = [ "optparse.Values", "thread._local", "_thread._local", "argparse.Namespace", "streamlit" ]
 
 # Show a hint with possible names when a member name was not found. The aspect of
 # finding the hint is based on edit distance.

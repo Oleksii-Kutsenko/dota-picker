@@ -59,7 +59,7 @@ def create_input_vector(
     )
 
 
-def create_augmented_dataframe(train_dataframe):
+def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
     results = []
     for _, row in train_dataframe.iterrows():
         team_picks = row.team_picks
