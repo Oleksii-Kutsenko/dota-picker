@@ -4,36 +4,24 @@ Try embedding of roles again. Embedd like [hero, roles, hero, role, hero, role, 
 Load personal matches - update if picks bans not available take heroes from players
 Update input vector—fetch from OpenDota heroes.json (roles, abilities for binaries like has_stun/has_dispel; attributes: primary, melee, base stats).
 Attributes divide into categorical (e.g., primary_attribute [str/agi/int], attack_type [melee/ranged], encoded as one-hot binaries like , batch_size x 10 x 6-8) and numerical (e.g., base_damage [0-100 normalized], armor [0-20], move_speed [0-350], base_hp [0-800], as floats, batch_size x 10 x 4), concatenated for projection. Roles are multi-label strings per hero (e.g., ["Carry","Escape","Nuker"] from ~20-30 vocab), individually embedded (nn.Embedding(num_roles, 16)) and averaged to a 16-dim vector per hero (batch_size x 10 x 16), enabling relational modeling like gank team synergies. Preprocessing uses MinMax for numericals and handles empty roles as zeros, resulting in ~90 dims per hero for fusion.
+Incorporate hero roles into input vectors: Good idea go through skills and check Stuns, Root, Silence, Slow, Hex, Taunt, Sleep, AoE skills, pure damage, has break, has dispel, provide vision, is invisible, and so on. STR, IS_Melee
+Update input vector—fetch from OpenDota heroes.json (roles, abilities for binaries like has_stun/has_dispel; attributes: primary, melee, base stats e.g., base_damage [0-100 normalized], armor [0-20], move_speed [0-350], base_hp [0-800], as floats). Preprocessing uses MinMax for numericals and handles empty roles as zeros.
 
-Add Hero Stats (Low Effort): Append per-hero feats (WR, GPM from /heroes) + personal (your WR/KDA from matches) as numericals (normalize). Weight personal in loss (e.g., +2x). Retrain; evaluate uplift in synergies.
+Add Hero Stats: Append per-hero feats (WR, GPM from /heroes) + personal (your WR/KDA from matches) as numericals (normalize). Weight personal in loss (e.g., +2x). Retrain; evaluate uplift in synergies. Take average if pick is not mine.
 
-Model Architecture
-The fusion layer integrates hero embeddings (nn.Embedding for 64-dim ID vectors, capturing traits like core vs. support), positional embeddings (nn.Embedding(10, 64) for timing biases, e.g., late picks as counters), attribute projection (nn.Linear(10-12 dims, 64) for one-hot orthogonality and numerical scaling), and role embeddings (averaged), via element-wise addition to form (batch_size x 10 x 64) sequences. Self-attention (nn.MultiheadAttention, 4 heads) attends over the fused inputs for team interactions (e.g., cross-team counter focus), with mean pooling to (batch_size x 64). A lightweight MLP (two linears, ReLU, dropout) produces sigmoid win probabilities, trained via Adam optimizer and BCE loss for ~50 epochs, allowing implicit patterns (e.g., vector proximity for balanced comps) to develop.
+Replace separate per-side self-attention with cross-attention: set queries to the candidate team’s tokens and keys/values to the opponent’s tokens to model counters and responses explicitly.
 
-Incorporate hero roles into input vectors: Extract hero roles (e.g., Carry, Midlaner, Offlaner, Support) from OpenDota's heroes.json API and add them as one-hot encoded features or embeddings concatenated to each hero's slot in the input vector (team_vec, opponent_vec, pick_vec). Good idea go through skills and check Stuns, Root, Silence, Slow, Hex, Taunt, Sleep, AoE skills, pure damage, has break, has dispel, provide vision, is invisible, and so on. STR, IS_Melee
 Optimize hyperparameters: Use Optuna to tune model hyperparameters (e.g., learning rate, embedding dimensions, FM latent factors) with a focus on personalization metrics, running trials on your validation set for 50-100 iterations.
-Training script probably can be optimized - investigate
-    Add statistics hero attributes: For each hero in the draft, compute and concatenate features like historical win rate, average damage dealt, and so on, can also collect/save and later add my hero performance to input vector, sourced from OpenDota or personal data; normalize these values for model stability.
-    Supplement with broader datasets: Download public pro/high-MMR match data from OpenDota or Kaggle datasets; merge with your personal match data, applying sample weighting (e.g., via PyTorch's WeightedRandomSampler) to prioritize your games during training.
-    Train personalized hero embeddings: Use Word2Vec or CBOW on sequences of heroes from a mixed dataset (general pro matches + your games) to create embeddings that group heroes by synergy and your playstyle; concatenate these embeddings to the input vector instead of raw one-hot encodings.
-    Apply chronological training splits and time-decay: Split your dataset by match timestamp or patch ID (using OpenDota's patch field) for train/validation/test sets; add time-decay weighting (e.g., exponential decay on older samples) in your loss function or sampler to emphasize recent metas.
-    Calibrate model probabilities: After training, use scikit-learn's CalibratedClassifierCV with isotonic regression or Platt scaling on your validation set; evaluate with Brier score or log-loss to ensure reliable win-chance estimates.
-    Implement Deep Sets for permutation-invariant team encoding: Read the Deep Sets paper (2017) and implement a simple Deep Sets layer in your model (e.g., via PyTorch nn.Module with phi and rho functions) to process each team's hero set independently, ensuring order doesn't leak.
 
-    Build a two-tower architecture: Design your model with two separate Deep Sets towers (one for your team, one for opponent); combine their outputs with cross-features (e.g., concatenation or dot product) before feeding into a final classifier for win probability.
+Add statistics hero attributes: For each hero in the draft, compute and concatenate features like historical win rate, average damage dealt, and so on, can also collect/save and later add my hero performance to input vector, sourced from OpenDota or personal data; normalize these values for model stability.
+Supplement with broader datasets: Download public pro/high-MMR match data from OpenDota or Kaggle datasets; merge with your personal match data, applying sample weighting (e.g., via PyTorch's WeightedRandomSampler) to prioritize your games during training.
+Train personalized hero embeddings: Use Word2Vec or CBOW on sequences of heroes from a mixed dataset (general pro matches + your games) to create embeddings that group heroes by synergy and your playstyle; concatenate these embeddings to the input vector instead of raw one-hot encodings.
+Calibrate model probabilities: After training, use scikit-learn's CalibratedClassifierCV with isotonic regression or Platt scaling on your validation set; evaluate with Brier score or log-loss to ensure reliable win-chance estimates.
+  Implement Deep Sets for permutation-invariant team encoding: Read the Deep Sets paper (2017) and implement a simple Deep Sets layer in your model (e.g., via PyTorch nn.Module with phi and rho functions) to process each team's hero set independently, ensuring order doesn't leak.
+  Build a two-tower architecture: Design your model with two separate Deep Sets towers (one for your team, one for opponent); combine their outputs with cross-features (e.g., concatenation or dot product) before feeding into a final classifier for win probability.
+Replace greedy selection with lookahead search: Implement a basic beam search or shallow Monte Carlo Tree Search (MCTS) in Python, using your model's calibrated probabilities to simulate opponent responses and evaluate multi-step draft outcomes.
+Update evaluation protocol: Compute AUC, Brier score, and per-patch performance on a held-out test set; add offline counterfactual tests by simulating draft perturbations and checking recommendation stability.
+Use differentiable F1 optimization: Implement a differentiable approximation of F1 (e.g., via sigmoid thresholding in a custom loss) to directly optimize it instead of BCE, which can help when F1 lags behind loss.
+Incorporate draft-time heuristics: Add checks in your inference code to enforce role completeness (e.g., penalize unbalanced teams missing a carry/support) and phase-aware priors (e.g., favor flex heroes early, counters late) based on the current pick stage.
+Ensemble models: Train 3-5 variants (e.g., with different seeds or subsets) and ensemble via averaging predictions; this often boosts F1 by 5-10% through diversity.
 
-    Replace greedy selection with lookahead search: Implement a basic beam search or shallow Monte Carlo Tree Search (MCTS) in Python, using your model's calibrated probabilities to simulate opponent responses and evaluate multi-step draft outcomes.
-
-    Update evaluation protocol: Compute AUC, Brier score, and per-patch performance on a held-out test set; add offline counterfactual tests by simulating draft perturbations and checking recommendation stability.
-
-    Use differentiable F1 optimization: Implement a differentiable approximation of F1 (e.g., via sigmoid thresholding in a custom loss) to directly optimize it instead of BCE, which can help when F1 lags behind loss.
-
-
-
-    Incorporate draft-time heuristics: Add checks in your inference code to enforce role completeness (e.g., penalize unbalanced teams missing a carry/support) and phase-aware priors (e.g., favor flex heroes early, counters late) based on the current pick stage.
-
-    Ensemble models: Train 3-5 variants (e.g., with different seeds or subsets) and ensemble via averaging predictions; this often boosts F1 by 5-10% through diversity.
-
-    Profile and optimize training: Use torch.profiler to check for bottlenecks (e.g., data loading, GPU usage); optimize batch sizes or use mixed precision (AMP) for faster iterations without sacrificing F1.
-
-Model Architecture Refinements (Medium Effort): Extend to 10-slot sequences (team+opp); add Deep Sets for invariance (phi: MLP on emb, rho: mean + Linear). Implement two-tower (separate team/opp attention, cross-dot for matchups). Fuse attributes/roles as planned; train ~50 epochs with BCE. Dependency: Updated data loader for 10-dim inputs.
