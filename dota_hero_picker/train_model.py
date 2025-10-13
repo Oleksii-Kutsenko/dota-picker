@@ -1,15 +1,16 @@
 import ast
 import logging
-import os
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import pandas as pd
 import torch
 from sklearn.metrics import (
     accuracy_score,
+    classification_report,
     f1_score,
     precision_score,
     recall_score,
@@ -41,8 +42,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
-    if not os.path.exists(csv_file_path):
-        raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
+    if not Path.exists(csv_file_path):
+        msg = f"CSV file not found: {csv_file_path}"
+        raise FileNotFoundError(msg)
 
     matches_dataframe = pd.read_csv(
         csv_file_path,
@@ -61,15 +63,15 @@ def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
     ]
     for column in to_split_columns:
         matches_dataframe[column] = matches_dataframe[column].apply(
-            ast.literal_eval
+            ast.literal_eval,
         )
         matches_dataframe[column] = matches_dataframe[column].apply(
             lambda hero_list: [
                 api_id_2_model_id[api_id] for api_id in hero_list
-            ]
+            ],
         )
     matches_dataframe["picked_hero"] = matches_dataframe["picked_hero"].apply(
-        lambda api_id: api_id_2_model_id[api_id]
+        lambda api_id: api_id_2_model_id[api_id],
     )
 
     return matches_dataframe
@@ -85,7 +87,13 @@ TrainingExample = tuple[
 
 
 class DotaDataset(Dataset[TrainingExample]):
-    def __init__(self, dataframe: pd.DataFrame, max_picks_per_team: int = 5):
+    """Stores dota 2 matches."""
+
+    def __init__(
+        self,
+        dataframe: pd.DataFrame,
+        max_picks_per_team: int = 5,
+    ) -> None:
         self.dataframe = dataframe
         self.max_len = max_picks_per_team
 
@@ -111,8 +119,17 @@ class DotaDataset(Dataset[TrainingExample]):
         )
 
 
+class ShuffleEnum(Enum):
+    """Shuffle Options Enum."""
+
+    SHUFFLED = True
+    UNSHUFFLED = False
+
+
 def get_data_loader(
-    dataset: Dataset[TrainingExample], batch_size: int, shuffle: bool = True
+    dataset: Dataset[TrainingExample],
+    batch_size: int,
+    shuffle: ShuffleEnum = ShuffleEnum.SHUFFLED,
 ) -> DataLoader[DotaDataset]:
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
@@ -121,12 +138,13 @@ def get_data_loader(
 class TrainingArguments:
     """Stores data for training."""
 
+    pos_weight: torch.Tensor
     train_dataset: DotaDataset
     val_dataset: DotaDataset
     epochs: int = 60
-    lr: float = 0.0001
-    batch_size: int = 32
-    patience: int = 3
+    lr: float = 0.00005
+    batch_size: int = 64
+    patience: int = 5
 
 
 def evaluate_model(
@@ -148,7 +166,6 @@ def evaluate_model(
             ]
             outputs = model(team_picks, opp_picks, actual_pick)
 
-            # Compute weighted loss to match training (optional: set decision_weight=1.0 for unweighted)
             per_sample_loss = criterion(outputs, is_win)
             mask = is_my_decision == 1.0  # Boolean mask from float tensor
             weights = torch.where(mask, decision_weight, 1.0)
@@ -164,9 +181,7 @@ def evaluate_model(
                 .numpy()
                 .flatten()
             )
-            label_batch = (
-                is_win.detach().cpu().numpy().flatten()
-            )  # Fixed: use is_win, flatten for 1D
+            label_batch = is_win.detach().cpu().numpy().flatten()
             preds.extend(pred)
             labels_list.extend(label_batch)
 
@@ -175,7 +190,8 @@ def evaluate_model(
     prec: float = precision_score(labels_list, preds, zero_division=0)
     rec: float = recall_score(labels_list, preds, zero_division=0)
     f1: float = f1_score(labels_list, preds, zero_division=0)
-    return avg_val_loss, acc, prec, rec, f1
+    report = classification_report(labels_list, preds, output_dict=False)
+    return avg_val_loss, acc, prec, rec, f1, report
 
 
 def train_model(
@@ -193,17 +209,21 @@ def train_model(
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         "min",
-        patience=2,
-        factor=0.1,
+        patience=training_arguments.patience,
+        factor=0.5,
     )
     mid_point = 0.5
-    decision_weight = 3.0
+    decision_weight = 2.0
 
     train_loader = get_data_loader(
-        training_arguments.train_dataset, training_arguments.batch_size, True
+        training_arguments.train_dataset,
+        training_arguments.batch_size,
+        ShuffleEnum.SHUFFLED,
     )
     val_loader = get_data_loader(
-        training_arguments.train_dataset, training_arguments.batch_size, False
+        training_arguments.val_dataset,
+        training_arguments.batch_size,
+        ShuffleEnum.UNSHUFFLED,
     )
 
     best_val_loss = float("inf")
@@ -225,7 +245,9 @@ def train_model(
 
             per_sample_loss = criterion(outputs, is_win)
             weights = torch.where(
-                (is_my_decision == 1.0), decision_weight, 1.0
+                (is_my_decision == 1.0),
+                decision_weight,
+                1.0,
             )
             loss = (per_sample_loss * weights).mean()
 
@@ -247,7 +269,9 @@ def train_model(
         avg_train_loss = train_loss / len(train_loader)
         train_acc = accuracy_score(train_labels, train_preds)
         train_prec = precision_score(
-            train_labels, train_preds, zero_division=0
+            train_labels,
+            train_preds,
+            zero_division=0,
         )
         train_rec = recall_score(train_labels, train_preds, zero_division=0)
         train_f1 = f1_score(train_labels, train_preds, zero_division=0)
@@ -261,7 +285,7 @@ def train_model(
             f"F1: {train_f1:.4f}",
         )
 
-        val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate_model(
+        val_loss, val_acc, val_prec, val_rec, val_f1, _ = evaluate_model(
             model,
             val_loader,
             criterion,
@@ -289,7 +313,8 @@ def train_model(
                 break
 
     if best_weights is None:
-        raise RuntimeError("Variable best_weights is None")
+        msg = "Variable best_weights is None"
+        raise RuntimeError(msg)
     model.load_state_dict(best_weights)
     return model
 
@@ -316,9 +341,21 @@ def compute_baseline_f1(
     return baseline_f1, majority_class, train_dist, val_dist
 
 
+def compute_pos_weight(decision_dataframe):
+    num_of_positives = len(decision_dataframe[decision_dataframe["win"] == 1])
+    num_of_negatives = len(decision_dataframe) - num_of_positives
+    pos_weight = torch.tensor([num_of_negatives / num_of_positives]).to(device)
+    logger.info("Class distribution for original data")
+    logger.info(f"Number of Wins {num_of_positives}")
+    logger.info(f"Number of Loses {num_of_negatives}")
+    logger.info(f"Pos Weight {pos_weight}")
+    return pos_weight
+
+
 def main(csv_file_path: str) -> None:
     """Model training entrypoint."""
     matches_dataframe = load_personal_matches(csv_file_path)
+    pos_weight = compute_pos_weight(matches_dataframe)
 
     train_dataframe, tmp_dataframe = train_test_split(
         matches_dataframe,
@@ -355,6 +392,7 @@ def main(csv_file_path: str) -> None:
     training_arguments = TrainingArguments(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
+        pos_weight=pos_weight,
     )
 
     trained_model = train_model(
@@ -362,7 +400,7 @@ def main(csv_file_path: str) -> None:
         training_arguments,
     )
 
-    val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate_model(
+    val_loss, val_acc, val_prec, val_rec, val_f1, report = evaluate_model(
         model,
         get_data_loader(test_dataset, training_arguments.batch_size, False),  # noqa: FBT003
         nn.BCEWithLogitsLoss(),
@@ -375,6 +413,7 @@ def main(csv_file_path: str) -> None:
         f"Rec: {val_rec:.4f}, "
         f"F1: {val_f1:.4f}",
     )
+    logger.info(f"\n{report}")
 
     torch.save(
         trained_model.state_dict(),

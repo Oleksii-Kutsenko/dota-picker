@@ -125,7 +125,7 @@ hero_positions = {
     "Io": [2, 4, 5],
     "Lone Druid": [1, 3],
     "Lycan": [1, 3],
-    "Meepo": [1, 2],
+    "Meepo": [2],
     "Night Stalker": [3, 4],
     "Omniknight": [3, 4, 5],
     "Oracle": [4, 5],
@@ -160,25 +160,20 @@ def suggest_best_picks(
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],
-    top_n: int = 10,
+    top_n: int = 20,
 ) -> list[tuple[str, float]]:
     model.eval()
     suggestions = []
 
-    # Baseline: team without new pick
     team_ids = pad_hero_ids(team_picks)
     opp_ids = pad_hero_ids(opponent_picks)
     team_tensor = torch.tensor([team_ids], dtype=torch.long, device=device)
     opp_tensor = torch.tensor([opp_ids], dtype=torch.long, device=device)
 
     with torch.no_grad():
-        baseline_prob = torch.sigmoid(
-            model(
-                team_tensor,
-                opp_tensor,
-                torch.tensor([0], dtype=torch.long, device=device),
-            ),
-        ).item()
+        baseline_tensor = torch.tensor([0], dtype=torch.long, device=device)
+        baseline_output = model(team_tensor, opp_tensor, baseline_tensor)
+        baseline_prob = torch.sigmoid(baseline_output).item()
 
         for candidate_hero in heroes:
             if (
@@ -190,18 +185,15 @@ def suggest_best_picks(
             if not set(hero_pos) & set(allowed_positions):
                 continue
 
-            candidate_id = hero_name_2_model_id.get(candidate_hero, 0)
-            if candidate_id == 0:
-                continue  # Skip invalid heroes
+            candidate_id = hero_name_2_model_id[candidate_hero]
 
             actual_pick_tensor = torch.tensor(
                 [candidate_id],
                 dtype=torch.long,
                 device=device,
             )
-            prob = torch.sigmoid(
-                model(team_tensor, opp_tensor, actual_pick_tensor),
-            ).item()
+            output = model(team_tensor, opp_tensor, actual_pick_tensor)
+            prob = torch.sigmoid(output).item()
             delta = prob - baseline_prob
 
             suggestions.append((candidate_hero, delta))
@@ -212,7 +204,7 @@ def suggest_best_picks(
 
 st.title("Dota Picker Web UI")
 
-model_path = settings.MODELS_FOLDER_PATH / Path("trained_model.pth")
+model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
 
 if model_path.exists():
     model = WinPredictorWithPositionalAttention(
