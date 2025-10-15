@@ -1,10 +1,11 @@
 from pathlib import Path
 
+import streamlit as st
 import torch
 
 import settings
-import streamlit as st
 from dota_hero_picker.data_preparation import (
+    MAX_PICK,
     hero_name_2_model_id,
 )
 from dota_hero_picker.load_personal_matches import get_hero_data
@@ -146,13 +147,12 @@ heroes = [hero_data_item["localized_name"] for hero_data_item in hero_data]
 num_heroes = len(heroes)
 hero_to_id = {hero: idx for idx, hero in enumerate(heroes)}
 id_to_hero = {idx: hero for hero, idx in hero_to_id.items()}
-max_picks = 5
 
 
 def pad_hero_ids(hero_names: list[str], max_picks: int = 5) -> list[int]:
     ids = [hero_to_id.get(name, 0) for name in hero_names]  # 0 if invalid
-    padded = ids + [0] * (max_picks - len(ids))
-    return padded[:max_picks]
+    padded = ids + [0] * (MAX_PICK - len(ids))
+    return padded[:MAX_PICK]
 
 
 def suggest_best_picks(

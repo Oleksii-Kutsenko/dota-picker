@@ -51,8 +51,10 @@ def load_public_matches() -> None:
 @cli.command()
 def train_model() -> None:
     try:
-        module = importlib.import_module("dota_hero_picker.train_model")
-        module.main(
+        model_trainer = importlib.import_module(
+            "dota_hero_picker.train_model.ModelTrainer"
+        )
+        model_trainer().main(
             settings.PERSONAL_DOTA_MATCHES_PATH,
         )
     except DotaPickerError as critical_error:

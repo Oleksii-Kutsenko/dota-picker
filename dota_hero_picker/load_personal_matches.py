@@ -1,6 +1,8 @@
 import csv
 import json
+import logging
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -12,6 +14,14 @@ API_MATCHES_ENDPOINT = "https://api.opendota.com/api/players/{}/matches"
 API_MATCH_DETAILS_ENDPOINT = "https://api.opendota.com/api/matches/{}"
 API_HEROES_ENDPOINT = "https://api.opendota.com/api/heroes"
 CURRENT_PATCH_START = datetime(2025, 8, 15)
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+
+logger = logging.getLogger(__name__)
 
 
 def get_hero_data(local_file: str = HEROES_FILE) -> list[dict[str, str]]:
@@ -195,6 +205,7 @@ def fetch_and_save_new_decisions(personal_dota_matches_path, account_id):
 
 def main(personal_dota_matches_path, account_id):
     num_saved = fetch_and_save_new_decisions(
-        personal_dota_matches_path, account_id
+        personal_dota_matches_path,
+        account_id,
     )
-    print(f"Total new matches saved: {num_saved}")
+    logger.info(f"Total new matches saved: {num_saved}")

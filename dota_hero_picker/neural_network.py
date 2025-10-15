@@ -1,20 +1,20 @@
+from typing import Any
+
 import torch
-import torch.nn.init as init
 from torch import nn
 
-from .data_preparation import (
-    embedding_dim,
-)
+from .data_preparation import MAX_PICK
 
 
 class WinPredictorWithPositionalAttention(nn.Module):
+    """Model for prediction dota 2 match result by drafts."""
+
     def __init__(
         self,
         num_heroes: int,
-        max_picks: int = 5,
         embedding_dim: int = 128,
         num_heads: int = 4,
-        hidden_sizes: list = [
+        hidden_sizes: list = (
             4096,
             2048,
             1024,
@@ -22,9 +22,9 @@ class WinPredictorWithPositionalAttention(nn.Module):
             256,
             128,
             64,
-        ],
+        ),
         dropout_rate: float = 0.2,
-    ):
+    ) -> None:
         super().__init__()
 
         self.hero_emb = nn.Embedding(
@@ -33,7 +33,7 @@ class WinPredictorWithPositionalAttention(nn.Module):
             padding_idx=0,
         )
 
-        self.positional_emb = nn.Embedding(max_picks, embedding_dim)
+        self.positional_emb = nn.Embedding(MAX_PICK, embedding_dim)
         self.attention = nn.MultiheadAttention(
             embed_dim=embedding_dim,
             num_heads=num_heads,
@@ -108,7 +108,7 @@ class WinPredictorWithPositionalAttention(nn.Module):
         team_hero_ids: torch.Tensor,
         opp_hero_ids: torch.Tensor,
         actual_pick_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Any:
         """Compute output."""
         batch_size = team_hero_ids.size(0)
         seq_len = team_hero_ids.size(1)

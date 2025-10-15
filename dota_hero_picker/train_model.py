@@ -42,7 +42,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
-    if not Path.exists(csv_file_path):
+    if not Path(csv_file_path).exists():
         msg = f"CSV file not found: {csv_file_path}"
         raise FileNotFoundError(msg)
 
@@ -131,7 +131,7 @@ def get_data_loader(
     batch_size: int,
     shuffle: ShuffleEnum = ShuffleEnum.SHUFFLED,
 ) -> DataLoader[DotaDataset]:
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle.value)
 
 
 @dataclass
@@ -152,7 +152,7 @@ def evaluate_model(
     loader: DataLoader[DotaDataset],
     criterion: nn.BCEWithLogitsLoss,
     decision_weight: float,
-) -> tuple[float, float, float, float, float]:
+) -> tuple[float, float, float, float, float, str]:
     model.eval()
     val_loss = 0
     mid_point = 0.5
@@ -341,7 +341,7 @@ def compute_baseline_f1(
     return baseline_f1, majority_class, train_dist, val_dist
 
 
-def compute_pos_weight(decision_dataframe):
+def compute_pos_weight(decision_dataframe: pd.DataFrame) -> torch.Tensor:
     num_of_positives = len(decision_dataframe[decision_dataframe["win"] == 1])
     num_of_negatives = len(decision_dataframe) - num_of_positives
     pos_weight = torch.tensor([num_of_negatives / num_of_positives]).to(device)
@@ -352,73 +352,93 @@ def compute_pos_weight(decision_dataframe):
     return pos_weight
 
 
-def main(csv_file_path: str) -> None:
-    """Model training entrypoint."""
-    matches_dataframe = load_personal_matches(csv_file_path)
-    pos_weight = compute_pos_weight(matches_dataframe)
+class ModelTrainer:
+    """Class responsible for model training."""
 
-    train_dataframe, tmp_dataframe = train_test_split(
-        matches_dataframe,
-        test_size=0.2,
-        stratify=matches_dataframe["win"],
-    )
-    validation_dataframe, test_dataframe = train_test_split(
-        tmp_dataframe,
-        test_size=0.5,
-        stratify=tmp_dataframe["win"],
-    )
-    augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
-    prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
-    prepared_test_dataframe = prepare_dataframe(test_dataframe)
+    def __init__(self, csv_file_path: str):
+        self.csv_file_path = csv_file_path
 
-    baseline_f1, majority_class, train_dist, val_dist = compute_baseline_f1(
-        augmented_train_dataframe["win"],
-        prepared_test_dataframe["win"],
-    )
-    logger.info(
-        "Baseline F1-score "
-        f"(always predict majority class {majority_class}): "
-        f"{baseline_f1:.4f}",
-    )
-    logger.info(f"Training class distribution: {train_dist}")
-    logger.info(f"Validation class distribution: {val_dist}")
+    def prepare_datasets(
+        self,
+    ) -> tuple[DotaDataset, DotaDataset, DotaDataset, torch.Tensor]:
+        matches_dataframe = load_personal_matches(self.csv_file_path)
+        pos_weight = compute_pos_weight(matches_dataframe)
 
-    train_dataset = DotaDataset(augmented_train_dataframe)
-    val_dataset = DotaDataset(prepared_validation_dataframe)
-    test_dataset = DotaDataset(prepared_test_dataframe)
+        train_dataframe, tmp_dataframe = train_test_split(
+            matches_dataframe,
+            test_size=0.2,
+            stratify=matches_dataframe["win"],
+        )
+        validation_dataframe, test_dataframe = train_test_split(
+            tmp_dataframe,
+            test_size=0.5,
+            stratify=tmp_dataframe["win"],
+        )
+        augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
+        prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
+        prepared_test_dataframe = prepare_dataframe(test_dataframe)
 
-    model = WinPredictorWithPositionalAttention(num_heroes)
+        baseline_f1, majority_class, train_dist, val_dist = (
+            compute_baseline_f1(
+                augmented_train_dataframe["win"],
+                prepared_test_dataframe["win"],
+            )
+        )
+        logger.info(
+            "Baseline F1-score "
+            f"(always predict majority class {majority_class}): "
+            f"{baseline_f1:.4f}",
+        )
+        logger.info(f"Training class distribution: {train_dist}")
+        logger.info(f"Validation class distribution: {val_dist}")
 
-    training_arguments = TrainingArguments(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        pos_weight=pos_weight,
-    )
+        train_dataset = DotaDataset(augmented_train_dataframe)
+        val_dataset = DotaDataset(prepared_validation_dataframe)
+        test_dataset = DotaDataset(prepared_test_dataframe)
+        return train_dataset, val_dataset, test_dataset, pos_weight
 
-    trained_model = train_model(
-        model,
-        training_arguments,
-    )
+    def main(self) -> None:
+        """Model training entrypoint."""
+        train_dataset, val_dataset, test_dataset, pos_weight = (
+            self.prepare_datasets()
+        )
 
-    val_loss, val_acc, val_prec, val_rec, val_f1, report = evaluate_model(
-        model,
-        get_data_loader(test_dataset, training_arguments.batch_size, False),  # noqa: FBT003
-        nn.BCEWithLogitsLoss(),
-        3,
-    )
-    logger.info(
-        f"Test Loss: {val_loss:.4f}, "
-        f"Acc: {val_acc:.4f}, "
-        f"Prec: {val_prec:.4f}, "
-        f"Rec: {val_rec:.4f}, "
-        f"F1: {val_f1:.4f}",
-    )
-    logger.info(f"\n{report}")
+        model = WinPredictorWithPositionalAttention(num_heroes)
 
-    torch.save(
-        trained_model.state_dict(),
-        settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
-    )
-    logger.info(
-        "Training complete! Model saved as 'trained_model.pth'.",
-    )
+        training_arguments = TrainingArguments(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            pos_weight=pos_weight,
+        )
+
+        trained_model = train_model(
+            model,
+            training_arguments,
+        )
+
+        val_loss, val_acc, val_prec, val_rec, val_f1, report = evaluate_model(
+            model,
+            get_data_loader(
+                test_dataset,
+                training_arguments.batch_size,
+                ShuffleEnum.SHUFFLED,
+            ),  # noqa: FBT003
+            nn.BCEWithLogitsLoss(),
+            3,
+        )
+        logger.info(
+            f"Test Loss: {val_loss:.4f}, "
+            f"Acc: {val_acc:.4f}, "
+            f"Prec: {val_prec:.4f}, "
+            f"Rec: {val_rec:.4f}, "
+            f"F1: {val_f1:.4f}",
+        )
+        logger.info(f"\n{report}")
+
+        torch.save(
+            trained_model.state_dict(),
+            settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
+        )
+        logger.info(
+            "Training complete! Model saved as 'trained_model.pth'.",
+        )

@@ -4,17 +4,14 @@ from collections import defaultdict
 from itertools import combinations
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-import torch
-
-import settings
 
 from .load_personal_matches import get_hero_data
 
 logger = logging.getLogger(__name__)
 
 hero_data = get_hero_data()
+MAX_PICK = 5
 hero_names = []
 hero_name_2_model_id = {}
 model_id_2_hero_name = {}
@@ -30,33 +27,6 @@ for model_id, hero in enumerate(hero_data, 1):
 
 embedding_dim = 32
 visibility_map = [0, 0, 2, 2, 4]
-
-
-def create_input_vector(
-    team_picks: list, opponent_picks: list, actual_pick: str
-) -> tuple:
-    # Vector for your team's heroes (size = num_heroes)
-    team_vec = np.zeros(num_heroes)
-    for index, hero in enumerate(team_picks, start=1):
-        if hero and hero in hero_to_id:
-            team_vec[hero_to_id[hero]] = index
-
-    # Vector for opponent's heroes (size = num_heroes)
-    opponent_vec = np.zeros(num_heroes)
-    for index, hero in enumerate(opponent_picks, start=1):
-        if hero and hero in hero_to_id:
-            opponent_vec[hero_to_id[hero]] = index
-
-    # One-hot vector for the hero pick being evaluated
-    pick_vec = np.zeros(num_heroes)
-    if actual_pick in hero_to_id:
-        pick_vec[hero_to_id[actual_pick]] = len(team_picks) + 1
-
-    return (
-        team_vec,
-        opponent_vec,
-        pick_vec,
-    )
 
 
 def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
