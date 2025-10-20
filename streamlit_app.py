@@ -10,6 +10,7 @@ from dota_hero_picker.data_preparation import (
 )
 from dota_hero_picker.load_personal_matches import get_hero_data
 from dota_hero_picker.neural_network import WinPredictorWithPositionalAttention
+from dota_hero_picker.train_model import create_model
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -149,10 +150,29 @@ hero_to_id = {hero: idx for idx, hero in enumerate(heroes)}
 id_to_hero = {idx: hero for hero, idx in hero_to_id.items()}
 
 
-def pad_hero_ids(hero_names: list[str], max_picks: int = 5) -> list[int]:
-    ids = [hero_to_id.get(name, 0) for name in hero_names]  # 0 if invalid
+def pad_hero_ids(hero_names: list[str]) -> list[int]:
+    ids = [hero_to_id[name] for name in hero_names]
     padded = ids + [0] * (MAX_PICK - len(ids))
     return padded[:MAX_PICK]
+
+
+def evaluate_candidate(
+    model: WinPredictorWithPositionalAttention,
+    candidate_hero: str,
+    baseline_prob: float,
+    team_tensor: torch.Tensor,
+    opp_tensor: torch.Tensor,
+) -> tuple[str, float]:
+    candidate_id = hero_name_2_model_id[candidate_hero]
+
+    actual_pick_tensor = torch.tensor(
+        [candidate_id],
+        dtype=torch.long,
+        device=device,
+    )
+    output = model(team_tensor, opp_tensor, actual_pick_tensor)
+    prob = torch.sigmoid(output).item()
+    return (candidate_hero, prob)
 
 
 def suggest_best_picks(
@@ -163,7 +183,7 @@ def suggest_best_picks(
     top_n: int = 20,
 ) -> list[tuple[str, float]]:
     model.eval()
-    suggestions = []
+    results = []
 
     team_ids = pad_hero_ids(team_picks)
     opp_ids = pad_hero_ids(opponent_picks)
@@ -181,25 +201,23 @@ def suggest_best_picks(
                 or candidate_hero in opponent_picks
             ):
                 continue
+
             hero_pos = hero_positions.get(candidate_hero, [1, 2, 3, 4, 5])
             if not set(hero_pos) & set(allowed_positions):
                 continue
 
-            candidate_id = hero_name_2_model_id[candidate_hero]
-
-            actual_pick_tensor = torch.tensor(
-                [candidate_id],
-                dtype=torch.long,
-                device=device,
+            results.append(
+                evaluate_candidate(
+                    model,
+                    candidate_hero,
+                    baseline_prob,
+                    team_tensor,
+                    opp_tensor,
+                ),
             )
-            output = model(team_tensor, opp_tensor, actual_pick_tensor)
-            prob = torch.sigmoid(output).item()
-            delta = prob - baseline_prob
 
-            suggestions.append((candidate_hero, delta))
-
-    suggestions.sort(key=lambda x: x[1], reverse=True)
-    return suggestions[:top_n]
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results[:top_n]
 
 
 st.title("Dota Picker Web UI")
@@ -207,19 +225,17 @@ st.title("Dota Picker Web UI")
 model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
 
 if model_path.exists():
-    model = WinPredictorWithPositionalAttention(
-        num_heroes,
-    )
-    model.load_state_dict(torch.load(model_path))
-    model.to(device)
-    model.eval()
+    loaded_model = create_model()
+    loaded_model.load_state_dict(torch.load(model_path))
+    loaded_model.to(device)
+    loaded_model.eval()
     st.success(f"Model loaded from {model_path}.")
 else:
     st.error(
         f"Model file '{model_path}' not found. "
         "Please train the model first using train_model.py.",
     )
-    st.stop()  # Halt the app if no model
+    st.stop()
 
 st.header("Draft Setup")
 
@@ -249,7 +265,7 @@ def on_opponent_change() -> None:
 
 team_options = [h for h in heroes if h not in st.session_state.opponent_picks]
 opponent_options = [h for h in heroes if h not in st.session_state.team_picks]
-team_picks = st.multiselect(
+team_picks_multiselect = st.multiselect(
     "Your Team Picks (up to 5)",
     options=team_options,
     max_selections=5,
@@ -258,7 +274,7 @@ team_picks = st.multiselect(
     on_change=on_team_change,
 )
 
-opponent_picks = st.multiselect(
+opponent_picks_multiselect = st.multiselect(
     "Opponent Team Picks (up to 5)",
     options=opponent_options,
     max_selections=5,
@@ -290,13 +306,13 @@ if st.button("Get Suggestions"):
             selected_positions if selected_positions else position_options
         )
         suggestions = suggest_best_picks(
-            model,
-            team_picks,
-            opponent_picks,
+            loaded_model,
+            team_picks_multiselect,
+            opponent_picks_multiselect,
             allowed,
         )
         st.subheader("Top Suggested Picks")
-        for idx, (hero, prob) in enumerate(suggestions, 1):
-            st.write(f"#{idx} {hero} (Win Prob: {prob * 100:.2f}%)")
+        for idx, (hero, probability) in enumerate(suggestions, 1):
+            st.write(f"#{idx} {hero} (Win Prob: {probability * 100:.2f}%)")
     except ValueError as e:
         st.error(f"Error: {e}")

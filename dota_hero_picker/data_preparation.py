@@ -1,8 +1,4 @@
 import logging
-import random
-from collections import defaultdict
-from itertools import combinations
-from pathlib import Path
 
 import pandas as pd
 
@@ -25,7 +21,6 @@ for model_id, hero in enumerate(hero_data, 1):
     model_id_2_hero_name[model_id] = hero_name
     api_id_2_model_id[api_hero_id] = model_id
 
-embedding_dim = 32
 visibility_map = [0, 0, 2, 2, 4]
 
 
@@ -37,13 +32,13 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
         my_pick = row.picked_hero
         win = row.win
 
-        for i in range(len(team_picks)):
-            actual_pick = team_picks[i]
+        for i, actual_pick in enumerate(team_picks):
             visible_team_picks = team_picks[:i]
             visible_opp_picks = opp_picks[
                 : min(visibility_map[i], len(opp_picks) - 1)
             ]
-            is_my_decision = True if my_pick == actual_pick else False
+
+            is_my_decision = my_pick == actual_pick
             results.append(
                 {
                     "visible_team_picks": visible_team_picks,
@@ -58,8 +53,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
         opp_picks = row.team_picks
         win = 1 - row.win
 
-        for i in range(len(team_picks)):
-            actual_pick = team_picks[i]
+        for i, actual_pick in enumerate(team_picks):
             visible_team_picks = team_picks[:i]
             visible_opp_picks = opp_picks[
                 : min(visibility_map[i], len(opp_picks) - 1)

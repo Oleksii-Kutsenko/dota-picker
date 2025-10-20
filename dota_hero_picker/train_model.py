@@ -1,19 +1,22 @@
 import ast
 import logging
-import sys
+import random
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
+import numpy as np
 import pandas as pd
 import torch
 from sklearn.metrics import (
     accuracy_score,
-    classification_report,
+    confusion_matrix,
     f1_score,
     precision_score,
     recall_score,
+    roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
 from torch import nn, optim
@@ -31,14 +34,33 @@ from .neural_network import (
     WinPredictorWithPositionalAttention,
 )
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def set_seed(seed: int = 42):
+    """Set random seeds for reproducibility."""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def create_model() -> WinPredictorWithPositionalAttention:
+    return WinPredictorWithPositionalAttention(
+        num_heroes,
+        embedding_dim=256,
+        num_heads=16,
+        dropout_rate=0.55,
+        hidden_sizes=(
+            4096,
+            32,
+            8,
+        ),
+    )
 
 
 def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
@@ -135,16 +157,83 @@ def get_data_loader(
 
 
 @dataclass
-class TrainingArguments:
-    """Stores data for training."""
+class MetricsResult:
+    """Training metrics."""
 
-    pos_weight: torch.Tensor
-    train_dataset: DotaDataset
-    val_dataset: DotaDataset
-    epochs: int = 60
-    lr: float = 0.00005
-    batch_size: int = 64
-    patience: int = 5
+    loss: float
+    accuracy: float
+    precision: float
+    recall: float
+    f1: float
+    auc: float | None = None
+    confusion_matrix: np.ndarray | None = None
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "loss": self.loss,
+            "accuracy": self.accuracy,
+            "precision": self.precision,
+            "recall": self.recall,
+            "f1": self.f1,
+            "auc": self.auc if self.auc is not None else 0.0,
+        }
+
+    def __str__(self) -> str:
+        return (
+            f"Loss: {self.loss:.4f}, Acc: {self.accuracy:.4f}, "
+            f"Prec: {self.precision:.4f}, Rec: {self.recall:.4f}, "
+            f"F1: {self.f1:.4f}"
+            + (f", AUC: {self.auc:.4f}" if self.auc else "")
+        )
+
+
+def process_evaluation_batch(
+    model,
+    batch_data,
+    decision_weight,
+    criterion,
+):
+    team_picks, opp_picks, actual_pick, is_win, is_my_decision = [
+        t.to(device) for t in batch_data
+    ]
+    outputs = model(team_picks, opp_picks, actual_pick)
+    per_sample_loss = criterion(outputs, is_win)
+
+    mask = is_my_decision == 1.0
+    weights = torch.where(mask, decision_weight, 1.0)
+    loss = (per_sample_loss * weights).mean()
+
+    return loss.item(), outputs, is_win
+
+
+def process_training_batch(
+    model: WinPredictorWithPositionalAttention,
+    batch_data,
+    training_components,
+    decision_weight,
+) -> tuple[float, torch.Tensor, torch.Tensor]:
+    """
+    Process a single batch: forward pass, loss computation,
+    and optimization step.
+    """
+    team_picks, opp_picks, actual_pick, is_win, is_my_decision = [
+        t.to(device) for t in batch_data
+    ]
+    training_components.optimizer.zero_grad()
+    outputs = model(team_picks, opp_picks, actual_pick)
+
+    per_sample_loss = training_components.criterion(outputs, is_win)
+    weights = torch.where(
+        (is_my_decision == 1.0),
+        decision_weight,
+        1.0,
+    )
+    loss = (per_sample_loss * weights).mean()
+
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    training_components.optimizer.step()
+    return loss.item(), outputs, is_win
 
 
 def evaluate_model(
@@ -152,177 +241,312 @@ def evaluate_model(
     loader: DataLoader[DotaDataset],
     criterion: nn.BCEWithLogitsLoss,
     decision_weight: float,
-) -> tuple[float, float, float, float, float, str]:
+) -> tuple[MetricsResult, np.ndarray]:
     model.eval()
-    val_loss = 0
+
+    all_losses = []
+    all_preds = []
+    all_probs = []
+    all_labels = []
     mid_point = 0.5
-    preds: list[float] = []
-    labels_list: list[float] = []
 
     with torch.no_grad():
-        for batch_data in loader:  # Fixed: use loader, not train_loader
-            team_picks, opp_picks, actual_pick, is_win, is_my_decision = [
-                t.to(device) for t in batch_data
-            ]
-            outputs = model(team_picks, opp_picks, actual_pick)
-
-            per_sample_loss = criterion(outputs, is_win)
-            mask = is_my_decision == 1.0  # Boolean mask from float tensor
-            weights = torch.where(mask, decision_weight, 1.0)
-            loss = (per_sample_loss * weights).mean()
-            val_loss += loss.item()
-
-            # Predictions and labels for unweighted metrics
-            pred = (
-                (torch.sigmoid(outputs) > mid_point)
-                .float()
-                .detach()
-                .cpu()
-                .numpy()
-                .flatten()
+        for batch_data in loader:
+            batch_loss, outputs, is_win = process_evaluation_batch(
+                model,
+                batch_data,
+                decision_weight,
+                criterion,
             )
-            label_batch = is_win.detach().cpu().numpy().flatten()
-            preds.extend(pred)
-            labels_list.extend(label_batch)
 
-    avg_val_loss = val_loss / len(loader)
-    acc: float = accuracy_score(labels_list, preds)
-    prec: float = precision_score(labels_list, preds, zero_division=0)
-    rec: float = recall_score(labels_list, preds, zero_division=0)
-    f1: float = f1_score(labels_list, preds, zero_division=0)
-    report = classification_report(labels_list, preds, output_dict=False)
-    return avg_val_loss, acc, prec, rec, f1, report
+            all_losses.append(batch_loss)
+
+            probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
+            preds = (probs > mid_point).astype(float)
+
+            all_probs.extend(probs)
+            all_preds.extend(preds)
+            all_labels.extend(is_win.cpu().numpy().flatten())
+
+    avg_loss = np.mean(all_losses)
+
+    metrics = calculate_metrics(
+        y_true=np.array(all_labels),
+        y_pred=np.array(all_preds),
+        y_proba=np.array(all_probs),
+        loss=avg_loss,
+    )
+    return metrics, np.array(all_probs)
+
+
+def train_step(
+    model: WinPredictorWithPositionalAttention,
+    train_loader,
+    training_components,
+    decision_weight,
+) -> tuple[float, list[torch.Tensor], list[torch.Tensor]]:
+    model.train()
+
+    all_losses = []
+    all_preds = []
+    all_probs = []
+    all_labels = []
+    mid_point = 0.5
+
+    for batch_data in train_loader:
+        batch_loss, outputs, is_win = process_training_batch(
+            model,
+            batch_data,
+            training_components,
+            decision_weight,
+        )
+
+        all_losses.append(batch_loss)
+
+        probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
+        preds = (probs > mid_point).astype(float)
+
+        all_probs.extend(probs)
+        all_preds.extend(preds)
+        all_labels.extend(is_win.cpu().numpy().flatten())
+
+    avg_train_loss = np.mean(all_losses)
+
+    metrics = calculate_metrics(
+        y_true=np.array(all_labels),
+        y_pred=np.array(all_preds),
+        y_proba=np.array(all_probs),
+        loss=avg_train_loss,
+    )
+    return metrics, np.array(all_probs)
+
+
+def calculate_metrics(
+    y_true,
+    y_pred,
+    y_proba,
+    loss,
+) -> MetricsResult:
+    accuracy = accuracy_score(y_true, y_pred)
+    precision = precision_score(
+        y_true,
+        y_pred,
+        zero_division=0,
+    )
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    auc = roc_auc_score(y_true, y_proba)
+    cm = confusion_matrix(
+        y_true,
+        y_pred,
+    )
+
+    return MetricsResult(
+        loss=loss,
+        accuracy=accuracy,
+        precision=precision,
+        recall=recall,
+        f1=f1,
+        auc=auc,
+        confusion_matrix=cm,
+    )
+
+
+class EarlyStopping:
+    """Simple early stopping."""
+
+    def __init__(self, patience: int = 5, delta: float = 0) -> None:
+        self.patience = patience
+        self.delta = delta
+        self.best_val_loss: float | None = None
+        self.best_f1_score: float | None = None
+        self.early_stop = False
+        self.counter = 0
+        self.best_model_state: dict | None = None
+
+    def __call__(
+        self,
+        val_loss: float,
+        val_f1_score: float,
+        model: WinPredictorWithPositionalAttention,
+    ) -> None:
+        score = -val_loss
+
+        if self.best_val_loss is None:
+            self.best_val_loss = score
+            self.best_f1_score = val_f1_score
+            self.best_model_state = model.state_dict()
+        elif score < self.best_val_loss + self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_val_loss = score
+            self.best_f1_score = val_f1_score
+            self.best_model_state = model.state_dict()
+            self.counter = 0
+
+    def load_best_model(self, model) -> None:
+        model.load_state_dict(self.best_model_state)
+
+
+@dataclass
+class TrainingData:
+    """Data for training."""
+
+    train_dataset: DotaDataset
+    val_dataset: DotaDataset
+
+
+@dataclass
+class SchedulerParameters:
+    """Scheduler Parameters."""
+
+    factor: float
+    threshold: float
+    scheduler_patience: int
+
+
+@dataclass
+class OptimizerParameters:
+    """Optimizer Parameters."""
+
+    lr: float
+    weight_decay: float
+
+
+@dataclass
+class TrainingArguments:
+    """Stores data for training."""
+
+    data: TrainingData
+    early_stopping_patience: int
+    scheduler_parameters: SchedulerParameters
+    optimizer_parameters: OptimizerParameters
+    batch_size: int
+    decision_weight: float
+    epochs: int
+    pos_weight: torch.Tensor | None = None
+
+
+@dataclass
+class TrainingComponents:
+    """Components for training."""
+
+    criterion: nn.BCEWithLogitsLoss
+    optimizer: optim.Adam
+    scheduler: optim.lr_scheduler.ReduceLROnPlateau
+    early_stopping: EarlyStopping
+    callbacks: list[Callable[[None], None]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.callbacks is None:
+            self.callbacks = []
+
+
+def train_epoch(
+    epoch: int,
+    model: WinPredictorWithPositionalAttention,
+    training_arguments: TrainingArguments,
+    training_components: TrainingComponents,
+) -> None:
+    logger.info(f"Epoch {epoch + 1}/{training_arguments.epochs}")
+    train_loader = get_data_loader(
+        training_arguments.data.train_dataset,
+        training_arguments.batch_size,
+        ShuffleEnum.SHUFFLED,
+    )
+    val_loader = get_data_loader(
+        training_arguments.data.val_dataset,
+        training_arguments.batch_size,
+        ShuffleEnum.UNSHUFFLED,
+    )
+
+    metrics, _ = train_step(
+        model,
+        train_loader,
+        training_components,
+        training_arguments.decision_weight,
+    )
+    logger.info(metrics)
+
+    val_metrics, _ = evaluate_model(
+        model,
+        val_loader,
+        training_components.criterion,
+        1,
+    )
+    logger.info(val_metrics)
+    training_components.scheduler.step(val_metrics.loss)
+
+    training_components.early_stopping(val_metrics.loss, val_metrics.f1, model)
 
 
 def train_model(
     model: WinPredictorWithPositionalAttention,
     training_arguments: TrainingArguments,
-) -> WinPredictorWithPositionalAttention:
+) -> tuple[WinPredictorWithPositionalAttention, float, float]:
     model.to(device)
 
-    criterion = nn.BCEWithLogitsLoss(reduction="none")
-    optimizer = optim.Adam(
+    if training_arguments.pos_weight:
+        criterion = nn.BCEWithLogitsLoss(
+            reduction="none",
+            pos_weight=training_arguments.pos_weight,
+        )
+    else:
+        criterion = nn.BCEWithLogitsLoss(reduction="none")
+
+    optimizer = optim.AdamW(
         model.parameters(),
-        lr=training_arguments.lr,
-        weight_decay=1e-4,
+        lr=training_arguments.optimizer_parameters.lr,
+        weight_decay=training_arguments.optimizer_parameters.weight_decay,
     )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         "min",
-        patience=training_arguments.patience,
-        factor=0.5,
-    )
-    mid_point = 0.5
-    decision_weight = 2.0
-
-    train_loader = get_data_loader(
-        training_arguments.train_dataset,
-        training_arguments.batch_size,
-        ShuffleEnum.SHUFFLED,
-    )
-    val_loader = get_data_loader(
-        training_arguments.val_dataset,
-        training_arguments.batch_size,
-        ShuffleEnum.UNSHUFFLED,
+        factor=training_arguments.scheduler_parameters.factor,
+        threshold=training_arguments.scheduler_parameters.threshold,
+        patience=training_arguments.scheduler_parameters.scheduler_patience,
     )
 
-    best_val_loss = float("inf")
-    patience_counter = 0
-    best_weights = None
-
+    training_components = TrainingComponents(
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        early_stopping=EarlyStopping(
+            patience=training_arguments.early_stopping_patience,
+        ),
+    )
     for epoch in range(training_arguments.epochs):
-        model.train()
-        train_loss = 0
-        train_preds: list[torch.Tensor] = []
-        train_labels: list[torch.Tensor] = []
-
-        for batch_data in train_loader:
-            team_picks, opp_picks, actual_pick, is_win, is_my_decision = [
-                t.to(device) for t in batch_data
-            ]
-            optimizer.zero_grad()
-            outputs = model(team_picks, opp_picks, actual_pick)
-
-            per_sample_loss = criterion(outputs, is_win)
-            weights = torch.where(
-                (is_my_decision == 1.0),
-                decision_weight,
-                1.0,
-            )
-            loss = (per_sample_loss * weights).mean()
-
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
-
-            preds = (
-                (torch.sigmoid(outputs) > mid_point)
-                .float()
-                .detach()
-                .cpu()
-                .numpy()
-                .flatten()
-            )
-            train_labels.extend(is_win.detach().cpu().numpy().flatten())
-            train_preds.extend(preds)
-
-        avg_train_loss = train_loss / len(train_loader)
-        train_acc = accuracy_score(train_labels, train_preds)
-        train_prec = precision_score(
-            train_labels,
-            train_preds,
-            zero_division=0,
-        )
-        train_rec = recall_score(train_labels, train_preds, zero_division=0)
-        train_f1 = f1_score(train_labels, train_preds, zero_division=0)
-
-        logger.info(
-            f"Epoch {epoch + 1}/{training_arguments.epochs} - "
-            f"Train Loss: {avg_train_loss:.4f}, "
-            f"Acc: {train_acc:.4f}, "
-            f"Prec: {train_prec:.4f}, "
-            f"Rec: {train_rec:.4f}, "
-            f"F1: {train_f1:.4f}",
-        )
-
-        val_loss, val_acc, val_prec, val_rec, val_f1, _ = evaluate_model(
+        train_epoch(
+            epoch,
             model,
-            val_loader,
-            criterion,
-            decision_weight,
+            training_arguments,
+            training_components,
         )
+        if training_components.early_stopping.early_stop:
+            logger.info("Early stopping triggered.")
+            break
 
-        scheduler.step(val_loss)
-        logger.info(
-            f"Val Loss: {val_loss:.4f}, "
-            f"Acc: {val_acc:.4f}, "
-            f"Prec: {val_prec:.4f}, "
-            f"Rec: {val_rec:.4f}, "
-            f"F1: {val_f1:.4f}",
-        )
-
-        # Early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            best_weights = model.state_dict()
-        else:
-            patience_counter += 1
-            if patience_counter >= training_arguments.patience:
-                logger.info("Early stopping triggered.")
-                break
-
-    if best_weights is None:
-        msg = "Variable best_weights is None"
+    if (
+        training_components.early_stopping.best_val_loss is None
+        or training_components.early_stopping.best_f1_score is None
+        or training_components.early_stopping.best_model_state is None
+    ):
+        msg = "Unexpected state"
         raise RuntimeError(msg)
-    model.load_state_dict(best_weights)
-    return model
+    model.load_state_dict(training_components.early_stopping.best_model_state)
+    return (
+        model,
+        -training_components.early_stopping.best_val_loss,
+        training_components.early_stopping.best_f1_score,
+    )
 
 
 def compute_baseline_f1(
     y_train: "pd.Series[float]",
     y_val: "pd.Series[float]",
-) -> tuple[float, float, dict[float, float], dict[float, float]]:
+) -> None:
     # Determine majority class from training data
     counter = Counter(y_train)
     majority_class = counter.most_common(1)[0][0]
@@ -338,7 +562,13 @@ def compute_baseline_f1(
     val_counter = Counter(y_val)
     val_dist = {k: v / len(y_val) for k, v in val_counter.items()}
 
-    return baseline_f1, majority_class, train_dist, val_dist
+    logger.info(
+        "Baseline F1-score "
+        f"(always predict majority class {majority_class}): "
+        f"{baseline_f1:.4f}",
+    )
+    logger.info(f"Training class distribution: {train_dist}")
+    logger.info(f"Validation class distribution: {val_dist}")
 
 
 def compute_pos_weight(decision_dataframe: pd.DataFrame) -> torch.Tensor:
@@ -355,7 +585,7 @@ def compute_pos_weight(decision_dataframe: pd.DataFrame) -> torch.Tensor:
 class ModelTrainer:
     """Class responsible for model training."""
 
-    def __init__(self, csv_file_path: str):
+    def __init__(self, csv_file_path: str) -> None:
         self.csv_file_path = csv_file_path
 
     def prepare_datasets(
@@ -378,19 +608,10 @@ class ModelTrainer:
         prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
         prepared_test_dataframe = prepare_dataframe(test_dataframe)
 
-        baseline_f1, majority_class, train_dist, val_dist = (
-            compute_baseline_f1(
-                augmented_train_dataframe["win"],
-                prepared_test_dataframe["win"],
-            )
+        compute_baseline_f1(
+            augmented_train_dataframe["win"],
+            prepared_test_dataframe["win"],
         )
-        logger.info(
-            "Baseline F1-score "
-            f"(always predict majority class {majority_class}): "
-            f"{baseline_f1:.4f}",
-        )
-        logger.info(f"Training class distribution: {train_dist}")
-        logger.info(f"Validation class distribution: {val_dist}")
 
         train_dataset = DotaDataset(augmented_train_dataframe)
         val_dataset = DotaDataset(prepared_validation_dataframe)
@@ -403,37 +624,69 @@ class ModelTrainer:
             self.prepare_datasets()
         )
 
-        model = WinPredictorWithPositionalAttention(num_heroes)
-
         training_arguments = TrainingArguments(
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            pos_weight=pos_weight,
+            data=TrainingData(
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+            ),
+            pos_weight=None,
+            early_stopping_patience=13,
+            epochs=46,
+            optimizer_parameters=OptimizerParameters(
+                lr=0.0004994948947163486,
+                weight_decay=0.000188288505786014,
+            ),
+            scheduler_parameters=SchedulerParameters(
+                factor=0.15,
+                threshold=0.0022,
+                scheduler_patience=13,
+            ),
+            decision_weight=5,
+            batch_size=128,
         )
 
-        trained_model = train_model(
+        model = create_model()
+        trained_model, _, _ = train_model(
             model,
             training_arguments,
         )
 
-        val_loss, val_acc, val_prec, val_rec, val_f1, report = evaluate_model(
-            model,
+        if training_arguments.pos_weight:
+            criterion = nn.BCEWithLogitsLoss(
+                reduction="none",
+                pos_weight=training_arguments.pos_weight,
+            )
+        else:
+            criterion = nn.BCEWithLogitsLoss(reduction="none")
+
+        metrics, _ = evaluate_model(
+            trained_model,
             get_data_loader(
                 test_dataset,
                 training_arguments.batch_size,
-                ShuffleEnum.SHUFFLED,
-            ),  # noqa: FBT003
-            nn.BCEWithLogitsLoss(),
-            3,
+                ShuffleEnum.UNSHUFFLED,
+            ),
+            criterion,
+            1,
         )
-        logger.info(
-            f"Test Loss: {val_loss:.4f}, "
-            f"Acc: {val_acc:.4f}, "
-            f"Prec: {val_prec:.4f}, "
-            f"Rec: {val_rec:.4f}, "
-            f"F1: {val_f1:.4f}",
+
+        logger.info("Test Metrics")
+        logger.info(metrics)
+
+        logger.info("--- Confusion Matrix ---")
+        header = f"{'':<12}" + "Pred: Loss    " + "Pred: Win     "
+        logger.info(header)
+        row1 = (
+            f"Actual: Loss  {metrics.confusion_matrix[0, 0]:<12}"  # type: ignore[index]
+            f"{metrics.confusion_matrix[0, 1]:<13}"  # type: ignore[index]
         )
-        logger.info(f"\n{report}")
+        row2 = (
+            f"Actual: Win   {metrics.confusion_matrix[1, 0]:<12}"  # type: ignore[index]
+            f"{metrics.confusion_matrix[1, 1]:<13}"  # type: ignore[index]
+        )
+        logger.info(row1)
+        logger.info(row2)
+        logger.info("------------------------")
 
         torch.save(
             trained_model.state_dict(),

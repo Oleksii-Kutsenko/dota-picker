@@ -9,6 +9,8 @@ from datetime import datetime
 import pandas as pd
 import requests
 
+from manage import DotaPickerError
+
 HEROES_FILE = "heroes.json"
 API_MATCHES_ENDPOINT = "https://api.opendota.com/api/players/{}/matches"
 API_MATCH_DETAILS_ENDPOINT = "https://api.opendota.com/api/matches/{}"
@@ -29,7 +31,7 @@ def get_hero_data(local_file: str = HEROES_FILE) -> list[dict[str, str]]:
         with open(local_file, "r", encoding="utf-8") as f:
             return json.load(f)
     else:
-        response = requests.get(API_HEROES_ENDPOINT)
+        response = requests.get(API_HEROES_ENDPOINT, timeout=5)
         if response.status_code != 200:
             raise DotaPickerError(
                 f"Failed to fetch heroes: {response.status_code}"
@@ -65,9 +67,6 @@ def parse_draft(match, account_id):
     picks_bans = match.get("picks_bans")
     players = match.get("players")
 
-    if not picks_bans or not players:
-        return None
-
     your_player = None
     for player in players:
         if player.get("account_id") == account_id:
@@ -79,6 +78,27 @@ def parse_draft(match, account_id):
     your_team = 0 if your_player.get("isRadiant") else 1
     win = 1 if match.get("radiant_win") == (your_team == 0) else 0
 
+    if not picks_bans:
+        if not players:
+            return None
+        team_picks = []
+        opp_picks = []
+        for player in players:
+            if player["team_number"] == your_team:
+                team_picks.append(player["hero_id"])
+            else:
+                opp_picks.append(player["hero_id"])
+
+        your_hero_id = your_player.get("hero_id")
+
+        return {
+            "team_picks": team_picks,
+            "opponent_picks": opp_picks,
+            "picked_hero": your_hero_id,
+            "win": win,
+            "match_id": match["match_id"],
+            "start_time": match.get("start_time", 0),
+        }
     team_picks = []
     opp_picks = []
     actually_picked_heroes = {player["hero_id"] for player in players}
@@ -111,8 +131,10 @@ def parse_draft(match, account_id):
 
 def fetch_match_details(match_ids, account_id, delay_seconds=1.1):
     detailed_decisions = []
-    for i, match_id in enumerate(match_ids):
-        response = requests.get(API_MATCH_DETAILS_ENDPOINT.format(match_id))
+    for match_id in match_ids:
+        response = requests.get(
+            API_MATCH_DETAILS_ENDPOINT.format(match_id), timeout=5
+        )
         if response.status_code == 200:
             match = response.json()
             data = parse_draft(match, account_id)
@@ -167,20 +189,13 @@ def save_to_csv(csv_path, new_decisions):
 
 
 def fetch_and_save_new_decisions(personal_dota_matches_path, account_id):
-    existing_match_ids, max_start_time = read_existing_matches(
-        personal_dota_matches_path
-    )
+    existing_match_ids, _ = read_existing_matches(personal_dota_matches_path)
 
     params = {}
-    if max_start_time:
-        params["date"] = (
-            datetime.today() - datetime.fromtimestamp(max_start_time)
-        ).days + 1
-    else:
-        params["date"] = (datetime.today() - CURRENT_PATCH_START).days + 1
+    params["date"] = (datetime.today() - CURRENT_PATCH_START).days + 1
 
     response = requests.get(
-        API_MATCHES_ENDPOINT.format(account_id), params=params
+        API_MATCHES_ENDPOINT.format(account_id), params=params, timeout=5
     )
     if response.status_code != 200:
         raise DotaPickerError(f"API error: {response.status_code}")
