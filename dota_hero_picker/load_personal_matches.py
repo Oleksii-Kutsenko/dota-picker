@@ -2,10 +2,11 @@ import csv
 import json
 import logging
 import os
-from collections import defaultdict
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -107,6 +108,7 @@ def parse_draft(match, account_id):
     actually_picked_heroes = defaultdict(list)
     for player in players:
         actually_picked_heroes[player["team_number"]].append(player["hero_id"])
+
     all_picks_sorted = sorted(
         [
             p
@@ -123,8 +125,18 @@ def parse_draft(match, account_id):
         else:
             opp_picks.append(hero_id)
 
-    if len(team_picks) != 5 or len(opp_picks) != 5:
-        breakpoint()
+    team_missing = list(
+        set(actually_picked_heroes[your_team]) - set(team_picks)
+    )
+    opp_missing = list(
+        set(actually_picked_heroes[1 - your_team]) - set(opp_picks)
+    )
+
+    team_picks = team_missing + team_picks
+    opp_picks = opp_missing + opp_picks
+
+    if len(team_picks + opp_picks) != 10:
+        raise RuntimeError("Picks parsing failed")
 
     your_hero_id = your_player.get("hero_id")
 
@@ -138,7 +150,7 @@ def parse_draft(match, account_id):
     }
 
 
-def fetch_match_details(match_ids, account_id, delay_seconds=1.1):
+def fetch_match_details(match_ids, account_id, delay_seconds=1.2):
     detailed_decisions = []
     for match_id in match_ids:
         response = requests.get(
@@ -149,10 +161,13 @@ def fetch_match_details(match_ids, account_id, delay_seconds=1.1):
             data = parse_draft(match, account_id)
             if data:
                 detailed_decisions.append(data)
+            else:
+                logger.info(f"Match #{match['match_id']} failed to parse.")
         else:
-            print(
+            logger.info(
                 f"Failed to fetch details for match {match_id}: {response.status_code}"
             )
+        logger.info(f"Match #{match_id} has been processed")
 
         time.sleep(delay_seconds)
     return detailed_decisions
@@ -193,7 +208,6 @@ def save_to_csv(csv_path, new_decisions):
     # Sort by start_time ascending
     df_all.sort_values(by="start_time", inplace=True)
 
-    # Write combined data back to CSV without index
     df_all.to_csv(csv_path, index=False)
 
 
@@ -218,12 +232,13 @@ def fetch_and_save_new_decisions(personal_dota_matches_path, account_id):
     ]
 
     if not new_match_ids:
-        print("No new current-patch matches.")
+        logger.info("No new current-patch matches.")
         return 0
 
     detailed = fetch_match_details(new_match_ids, account_id)
+    Path(personal_dota_matches_path).parent.mkdir(exist_ok=True)
     save_to_csv(personal_dota_matches_path, detailed)
-    print(f"Saved {len(detailed)} new decisions.")
+    logger.info(f"Saved {len(detailed)} new decisions.")
     return len(detailed)
 
 
