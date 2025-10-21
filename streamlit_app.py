@@ -9,7 +9,7 @@ from dota_hero_picker.data_preparation import (
     hero_name_2_model_id,
 )
 from dota_hero_picker.load_personal_matches import get_hero_data
-from dota_hero_picker.neural_network import WinPredictorWithPositionalAttention
+from dota_hero_picker.neural_network import WinPredictor
 from dota_hero_picker.train_model import create_model
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -157,7 +157,7 @@ def pad_hero_ids(hero_names: list[str]) -> list[int]:
 
 
 def evaluate_candidate(
-    model: WinPredictorWithPositionalAttention,
+    model: WinPredictor,
     candidate_hero: str,
     team_tensor: torch.Tensor,
     opp_tensor: torch.Tensor,
@@ -175,7 +175,7 @@ def evaluate_candidate(
 
 
 def suggest_best_picks(
-    model: WinPredictorWithPositionalAttention,
+    model: WinPredictor,
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],

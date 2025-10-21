@@ -25,7 +25,7 @@ from .data_preparation import (
     prepare_dataframe,
 )
 from .neural_network import (
-    WinPredictorWithPositionalAttention,
+    WinPredictor,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,11 +33,11 @@ logger = logging.getLogger(__name__)
 
 def create_objective(
     model_trainer: ModelTrainer,
-) -> Callable[[Trial], float]:
+) -> Callable[[Trial], tuple[float, float, float]]:
     matches_dataframe = load_personal_matches(model_trainer.csv_file_path)
     pos_weight = compute_pos_weight(matches_dataframe)
 
-    def objective(trial: Trial) -> float:
+    def objective(trial: Trial) -> tuple[float, float, float]:
         learning_rate = trial.suggest_float("lr", 1e-6, 1e-2, log=True)
         weight_decay = trial.suggest_float(
             "weight_decay",
@@ -61,22 +61,22 @@ def create_objective(
 
         decision_weight = trial.suggest_int("decision_weight", 1, 10)
         batch_size = trial.suggest_categorical(
-            "batch_size", [8, 16, 32, 64, 128]
+            "batch_size",
+            [8, 16, 32, 64, 128],
         )
 
         dropout_rate = trial.suggest_float("dropout_rate", 0.0, 0.7, step=0.05)
         embedding_dim = trial.suggest_int("embedding_dim", 8, 32)
 
         n_layers = trial.suggest_int("n_layers", 1, 4)
-        layer_sizes = []
-        for i in range(n_layers):
-            layer_sizes.append(
-                trial.suggest_int(
-                    f"layer_{i}_size",
-                    1,
-                    64,
-                )
+        layer_sizes = [
+            trial.suggest_int(
+                f"layer_{i}_size",
+                1,
+                64,
             )
+            for i in range(n_layers)
+        ]
 
         skf = StratifiedKFold(n_splits=3, shuffle=True)
         folds_val_f1 = []
@@ -95,7 +95,7 @@ def create_objective(
             train_dataset = DotaDataset(augmented_train)
             val_dataset = DotaDataset(prepared_val)
 
-            model = WinPredictorWithPositionalAttention(
+            model = WinPredictor(
                 num_heroes,
                 embedding_dim,
                 tuple(layer_sizes),

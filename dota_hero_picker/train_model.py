@@ -1,11 +1,10 @@
 import ast
 import logging
-import random
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -31,7 +30,7 @@ from .data_preparation import (
     prepare_dataframe,
 )
 from .neural_network import (
-    WinPredictorWithPositionalAttention,
+    WinPredictor,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,13 +38,13 @@ logger = logging.getLogger(__name__)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def count_trainable_params(model):
+def count_trainable_params(model: WinPredictor):
     """Count the number of trainable parameters in a PyTorch model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def create_model() -> WinPredictorWithPositionalAttention:
-    return WinPredictorWithPositionalAttention(
+def create_model() -> WinPredictor:
+    return WinPredictor(
         num_heroes,
         embedding_dim=32,
         dropout_rate=0.6,
@@ -155,7 +154,7 @@ class MetricsResult:
     precision: float
     recall: float
     f1: float
-    auc: float | None = None
+    auc: float
     confusion_matrix: np.ndarray | None = None
 
     def to_dict(self) -> dict[str, float]:
@@ -197,7 +196,7 @@ def process_evaluation_batch(
 
 
 def process_training_batch(
-    model: WinPredictorWithPositionalAttention,
+    model: WinPredictor,
     batch_data,
     training_components,
     decision_weight,
@@ -227,7 +226,7 @@ def process_training_batch(
 
 
 def evaluate_model(
-    model: WinPredictorWithPositionalAttention,
+    model: WinPredictor,
     loader: DataLoader[DotaDataset],
     criterion: nn.BCEWithLogitsLoss,
     decision_weight: float,
@@ -270,11 +269,11 @@ def evaluate_model(
 
 
 def train_step(
-    model: WinPredictorWithPositionalAttention,
+    model: WinPredictor,
     train_loader,
     training_components,
     decision_weight,
-) -> tuple[float, list[torch.Tensor], list[torch.Tensor]]:
+) -> tuple[MetricsResult, np.ndarray]:
     model.train()
 
     all_losses = []
@@ -358,7 +357,7 @@ class EarlyStopping:
         self,
         val_loss: float,
         metrics: MetricsResult,
-        model: WinPredictorWithPositionalAttention,
+        model: WinPredictor,
     ) -> None:
         score = -val_loss
 
@@ -436,7 +435,7 @@ class TrainingComponents:
 
 def train_epoch(
     epoch: int,
-    model: WinPredictorWithPositionalAttention,
+    model: WinPredictor,
     training_arguments: TrainingArguments,
     training_components: TrainingComponents,
 ) -> None:
@@ -473,9 +472,9 @@ def train_epoch(
 
 
 def train_model(
-    model: WinPredictorWithPositionalAttention,
+    model: WinPredictor,
     training_arguments: TrainingArguments,
-) -> tuple[WinPredictorWithPositionalAttention, float, float]:
+) -> tuple[WinPredictor, MetricsResult]:
     model.to(device)
 
     if training_arguments.pos_weight:
@@ -521,6 +520,7 @@ def train_model(
     if (
         training_components.early_stopping.best_val_loss is None
         or training_components.early_stopping.best_metrics is None
+        or training_components.early_stopping.best_model_state is None
     ):
         msg = "Unexpected state"
         raise RuntimeError(msg)
@@ -594,7 +594,7 @@ class ModelTrainer:
         )
         augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
         logger.info(
-            f"Number of augmented training examples {len(augmented_train_dataframe)}"
+            f"Size of augmented dataset {len(augmented_train_dataframe)}",
         )
         prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
         prepared_test_dataframe = prepare_dataframe(test_dataframe)
@@ -611,7 +611,7 @@ class ModelTrainer:
 
     def main(self) -> None:
         """Model training entrypoint."""
-        train_dataset, val_dataset, test_dataset, pos_weight = (
+        train_dataset, val_dataset, test_dataset, pos_weight = (  # noqa: RUF059
             self.prepare_datasets()
         )
 
@@ -638,7 +638,7 @@ class ModelTrainer:
 
         model = create_model()
         logger.info(
-            f"Model trainable parameters amounts {count_trainable_params(model)}"
+            f"Model trainable parameters: {count_trainable_params(model)}",
         )
         trained_model, _ = train_model(
             model,

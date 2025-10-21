@@ -6,7 +6,7 @@ from torch import nn
 from .data_preparation import MAX_PICK
 
 
-class WinPredictorWithPositionalAttention(nn.Module):
+class WinPredictor(nn.Module):
     """
     A model for predicting Dota 2 match results by drafts.
     """
@@ -128,6 +128,4 @@ class WinPredictorWithPositionalAttention(nn.Module):
             dim=1,
         )
 
-        out = self.output_layer(self.network(draft_context)).squeeze(-1)
-
-        return out
+        return self.output_layer(self.network(draft_context)).squeeze(-1)
