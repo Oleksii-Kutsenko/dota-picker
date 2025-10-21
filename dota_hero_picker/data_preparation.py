@@ -32,6 +32,16 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
         my_pick = row.picked_hero
         win = row.win
 
+        draft_sequence = (
+            team_picks[:2]
+            + opp_picks[:2]
+            + team_picks[2:4]
+            + opp_picks[2:4]
+            + team_picks[4:]
+        )
+        if len(draft_sequence) != 9:
+            breakpoint()
+
         for i, actual_pick in enumerate(team_picks):
             visible_team_picks = team_picks[:i]
             visible_opp_picks = opp_picks[

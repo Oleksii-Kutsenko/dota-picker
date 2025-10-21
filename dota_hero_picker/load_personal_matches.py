@@ -2,6 +2,7 @@ import csv
 import json
 import logging
 import os
+from collections import defaultdict
 import sys
 import time
 from datetime import datetime
@@ -64,15 +65,15 @@ def read_existing_matches(csv_path):
 
 
 def parse_draft(match, account_id):
-    picks_bans = match.get("picks_bans")
     players = match.get("players")
+    picks_bans = match.get("picks_bans")
 
     your_player = None
     for player in players:
         if player.get("account_id") == account_id:
             your_player = player
             break
-    if your_player is None:
+    else:
         return None
 
     your_team = 0 if your_player.get("isRadiant") else 1
@@ -99,14 +100,19 @@ def parse_draft(match, account_id):
             "match_id": match["match_id"],
             "start_time": match.get("start_time", 0),
         }
+
     team_picks = []
     opp_picks = []
-    actually_picked_heroes = {player["hero_id"] for player in players}
+
+    actually_picked_heroes = defaultdict(list)
+    for player in players:
+        actually_picked_heroes[player["team_number"]].append(player["hero_id"])
     all_picks_sorted = sorted(
         [
             p
             for p in picks_bans
-            if p.get("is_pick") and p["hero_id"] in actually_picked_heroes
+            if p.get("is_pick")
+            and p["hero_id"] in actually_picked_heroes.values()
         ],
         key=lambda p: p["order"],
     )
@@ -116,6 +122,9 @@ def parse_draft(match, account_id):
             team_picks.append(hero_id)
         else:
             opp_picks.append(hero_id)
+
+    if len(team_picks) != 5 or len(opp_picks) != 5:
+        breakpoint()
 
     your_hero_id = your_player.get("hero_id")
 

@@ -31,6 +31,67 @@ from .neural_network import (
 logger = logging.getLogger(__name__)
 
 
+def perform_fold(
+    matches_dataframe, train_idx, val_idx, model, training_arguments
+):
+    train_df = matches_dataframe.iloc[train_idx]
+    val_df = matches_dataframe.iloc[val_idx]
+
+    augmented_train = create_augmented_dataframe(train_df)
+    prepared_val = prepare_dataframe(val_df)
+    train_dataset = DotaDataset(augmented_train)
+    val_dataset = DotaDataset(prepared_val)
+
+    training_arguments.data = TrainingData(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+    )
+
+    model, metrics = train_model(
+        model,
+        training_arguments,
+    )
+    return metrics
+
+
+def perform_cross_validation(
+    matches_dataframe,
+    training_arguments,
+    embedding_dim,
+    dropout_rate,
+    layer_sizes,
+):
+    skf = StratifiedKFold(n_splits=3, shuffle=True)
+    folds_val_f1 = []
+    folds_val_loss = []
+    folds_val_auc = []
+
+    for train_idx, val_idx in skf.split(
+        matches_dataframe,
+        matches_dataframe["win"],
+    ):
+        model = WinPredictor(
+            num_heroes,
+            embedding_dim,
+            tuple(layer_sizes),
+            dropout_rate,
+        )
+
+        metrics = perform_fold(
+            matches_dataframe, train_idx, val_idx, model, training_arguments
+        )
+
+        folds_val_f1.append(metrics.f1)
+        folds_val_loss.append(metrics.loss)
+        folds_val_auc.append(metrics.auc)
+    return (
+        np.mean(folds_val_f1),
+        np.mean(folds_val_loss),
+        np.mean(folds_val_auc),
+        count_trainable_params(model),
+    )
+
+
 def create_objective(
     model_trainer: ModelTrainer,
 ) -> Callable[[Trial], tuple[float, float, float]]:
@@ -38,31 +99,9 @@ def create_objective(
     pos_weight = compute_pos_weight(matches_dataframe)
 
     def objective(trial: Trial) -> tuple[float, float, float]:
-        learning_rate = trial.suggest_float("lr", 1e-6, 1e-2, log=True)
-        weight_decay = trial.suggest_float(
-            "weight_decay",
-            1e-6,
-            1,
-            log=True,
-        )
-        scheduler_patience = trial.suggest_int("scheduler_patience", 5, 25)
-        early_stopping_patience = trial.suggest_int(
-            "early_stopping_patience",
-            5,
-            19,
-        )
-        epochs = trial.suggest_int("epochs", 1, 50)
-        factor = trial.suggest_float("factor", 0.1, 0.5, step=0.05)
-        threshold = trial.suggest_float("threshold", 1e-5, 1e-2, step=1e-4)
         use_pos_weight = trial.suggest_categorical(
             "use_pos_weight",
             [True, False],
-        )
-
-        decision_weight = trial.suggest_int("decision_weight", 1, 10)
-        batch_size = trial.suggest_categorical(
-            "batch_size",
-            [8, 16, 32, 64, 128],
         )
 
         dropout_rate = trial.suggest_float("dropout_rate", 0.0, 0.7, step=0.05)
@@ -78,70 +117,55 @@ def create_objective(
             for i in range(n_layers)
         ]
 
-        skf = StratifiedKFold(n_splits=3, shuffle=True)
-        folds_val_f1 = []
-        folds_val_loss = []
-        folds_val_auc = []
-
-        for train_idx, val_idx in skf.split(
-            matches_dataframe,
-            matches_dataframe["win"],
-        ):
-            train_df = matches_dataframe.iloc[train_idx]
-            val_df = matches_dataframe.iloc[val_idx]
-
-            augmented_train = create_augmented_dataframe(train_df)
-            prepared_val = prepare_dataframe(val_df)
-            train_dataset = DotaDataset(augmented_train)
-            val_dataset = DotaDataset(prepared_val)
-
-            model = WinPredictor(
-                num_heroes,
-                embedding_dim,
-                tuple(layer_sizes),
-                dropout_rate,
-            )
-
-            training_arguments = TrainingArguments(
-                data=TrainingData(
-                    train_dataset=train_dataset,
-                    val_dataset=val_dataset,
+        training_arguments = TrainingArguments(
+            pos_weight=pos_weight if use_pos_weight else None,
+            early_stopping_patience=(
+                trial.suggest_int(
+                    "early_stopping_patience",
+                    5,
+                    19,
+                )
+            ),
+            optimizer_parameters=OptimizerParameters(
+                lr=trial.suggest_float("lr", 1e-6, 1e-2, log=True),
+                weight_decay=trial.suggest_float(
+                    "weight_decay",
+                    1e-6,
+                    1,
+                    log=True,
                 ),
-                early_stopping_patience=early_stopping_patience,
-                optimizer_parameters=OptimizerParameters(
-                    lr=learning_rate,
-                    weight_decay=weight_decay,
+            ),
+            epochs=trial.suggest_int("epochs", 1, 50),
+            scheduler_parameters=SchedulerParameters(
+                factor=trial.suggest_float("factor", 0.1, 0.5, step=0.05),
+                threshold=trial.suggest_float(
+                    "threshold", 1e-5, 1e-2, step=1e-4
                 ),
-                epochs=epochs,
-                scheduler_parameters=SchedulerParameters(
-                    factor=factor,
-                    threshold=threshold,
-                    scheduler_patience=scheduler_patience,
+                scheduler_patience=trial.suggest_int(
+                    "scheduler_patience", 5, 25
                 ),
-                batch_size=batch_size,
-                decision_weight=decision_weight,
-            )
+            ),
+            batch_size=trial.suggest_categorical(
+                "batch_size",
+                [8, 16, 32, 64, 128],
+            ),
+            decision_weight=trial.suggest_int("decision_weight", 1, 10),
+        )
 
-            if use_pos_weight:
-                training_arguments.pos_weight = pos_weight
-            else:
-                training_arguments.pos_weight = None
-
-            model, metrics = train_model(
-                model,
+        mean_f1, mean_val_loss, mean_val_auc, trainable_params = (
+            perform_cross_validation(
+                matches_dataframe,
                 training_arguments,
+                embedding_dim,
+                dropout_rate,
+                layer_sizes,
             )
-            folds_val_f1.append(metrics.f1)
-            folds_val_loss.append(metrics.loss)
-            folds_val_auc.append(metrics.auc)
-        mean_f1 = np.mean(folds_val_f1)
-        mean_val_loss = np.mean(folds_val_loss)
-        mean_val_auc = np.mean(folds_val_auc)
+        )
 
         trial.set_user_attr("mean_val_loss", mean_val_loss)
         trial.set_user_attr(
             "model_trainable_params",
-            count_trainable_params(model),
+            trainable_params,
         )
         trial.set_user_attr("model_val_auc", mean_val_auc)
 

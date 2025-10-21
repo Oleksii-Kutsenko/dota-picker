@@ -408,13 +408,13 @@ class OptimizerParameters:
 class TrainingArguments:
     """Stores data for training."""
 
-    data: TrainingData
     early_stopping_patience: int
     scheduler_parameters: SchedulerParameters
     optimizer_parameters: OptimizerParameters
     batch_size: int
     decision_weight: float
     epochs: int
+    data: TrainingData | None = None
     pos_weight: torch.Tensor | None = None
 
 
@@ -611,7 +611,7 @@ class ModelTrainer:
 
     def main(self) -> None:
         """Model training entrypoint."""
-        train_dataset, val_dataset, test_dataset, pos_weight = (  # noqa: RUF059
+        train_dataset, val_dataset, test_dataset, pos_weight = (  # pylint: disable=W0612 # noqa: RUF059
             self.prepare_datasets()
         )
 
