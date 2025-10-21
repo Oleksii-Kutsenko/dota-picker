@@ -29,9 +29,7 @@ from .data_preparation import (
     num_heroes,
     prepare_dataframe,
 )
-from .neural_network import (
-    WinPredictor,
-)
+from .neural_network import RNNWinPredictor, WinPredictor
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +42,9 @@ def count_trainable_params(model: WinPredictor):
 
 
 def create_model() -> WinPredictor:
-    return WinPredictor(
+    return RNNWinPredictor(
         num_heroes,
-        embedding_dim=32,
-        dropout_rate=0.6,
-        hidden_sizes=(32,),
+        gru_hidden_dim=16,
     )
 
 
@@ -115,16 +111,9 @@ class DotaDataset(Dataset[TrainingExample]):
     def __getitem__(self, idx: int) -> TrainingExample:
         """Return training example."""
         row = self.dataframe.iloc[idx]
-        team_picks_padded = row["visible_team_picks"] + [0] * (
-            self.max_len - len(row["visible_team_picks"])
-        )
-        opp_picks_padded = row["visible_opp_picks"] + [0] * (
-            self.max_len - len(row["visible_opp_picks"])
-        )
+
         return (
-            torch.tensor(team_picks_padded, dtype=torch.long),
-            torch.tensor(opp_picks_padded, dtype=torch.long),
-            torch.tensor(row["actual_pick"], dtype=torch.long),
+            torch.tensor(row["draft_sequence"], dtype=torch.long),
             torch.tensor(row["win"], dtype=torch.float),
             torch.tensor(row.get("is_my_decision", 0.0), dtype=torch.float),
         )
@@ -182,10 +171,8 @@ def process_evaluation_batch(
     decision_weight,
     criterion,
 ):
-    team_picks, opp_picks, actual_pick, is_win, is_my_decision = [
-        t.to(device) for t in batch_data
-    ]
-    outputs = model(team_picks, opp_picks, actual_pick)
+    draft_sequence, is_win, is_my_decision = [t.to(device) for t in batch_data]
+    outputs = model(draft_sequence)
     per_sample_loss = criterion(outputs, is_win)
 
     mask = is_my_decision == 1.0
@@ -205,11 +192,9 @@ def process_training_batch(
     Process a single batch: forward pass, loss computation,
     and optimization step.
     """
-    team_picks, opp_picks, actual_pick, is_win, is_my_decision = [
-        t.to(device) for t in batch_data
-    ]
+    draft_sequence, is_win, is_my_decision = [t.to(device) for t in batch_data]
     training_components.optimizer.zero_grad()
-    outputs = model(team_picks, opp_picks, actual_pick)
+    outputs = model(draft_sequence)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
     weights = torch.where(

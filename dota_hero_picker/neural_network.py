@@ -3,7 +3,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from .data_preparation import MAX_PICK
+SEQ_LEN = 9
 
 
 class RNNWinPredictor(nn.Module):
@@ -18,7 +18,7 @@ class RNNWinPredictor(nn.Module):
         super().__init__()
         self.gru_hidden_dim = gru_hidden_dim
         self.num_gru_layers = num_gru_layers
-        self.seq_len = 9
+        self.seq_len = SEQ_LEN
 
         self.hero_emb = nn.Embedding(
             num_heroes + 1, embedding_dim, padding_idx=0

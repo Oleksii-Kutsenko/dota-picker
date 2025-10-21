@@ -3,6 +3,7 @@ import logging
 import pandas as pd
 
 from .load_personal_matches import get_hero_data
+from .neural_network import SEQ_LEN
 
 logger = logging.getLogger(__name__)
 
@@ -39,21 +40,13 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
             + opp_picks[2:4]
             + team_picks[4:]
         )
-        if len(draft_sequence) != 9:
-            breakpoint()
-
-        for i, actual_pick in enumerate(team_picks):
-            visible_team_picks = team_picks[:i]
-            visible_opp_picks = opp_picks[
-                : min(visibility_map[i], len(opp_picks) - 1)
-            ]
-
-            is_my_decision = my_pick == actual_pick
+        for index, pick in enumerate(draft_sequence, 1):
+            is_my_decision = my_pick == pick
             results.append(
                 {
-                    "visible_team_picks": visible_team_picks,
-                    "visible_opp_picks": visible_opp_picks,
-                    "actual_pick": actual_pick,
+                    "draft_sequence": (
+                        draft_sequence[:index] + [0] * (SEQ_LEN - index)
+                    ),
                     "win": win,
                     "is_my_decision": is_my_decision,
                 }
@@ -63,16 +56,19 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
         opp_picks = row.team_picks
         win = 1 - row.win
 
-        for i, actual_pick in enumerate(team_picks):
-            visible_team_picks = team_picks[:i]
-            visible_opp_picks = opp_picks[
-                : min(visibility_map[i], len(opp_picks) - 1)
-            ]
+        draft_sequence = (
+            team_picks[:2]
+            + opp_picks[:2]
+            + team_picks[2:4]
+            + opp_picks[2:4]
+            + team_picks[4:]
+        )
+        for index, _ in enumerate(draft_sequence, 1):
             results.append(
                 {
-                    "visible_team_picks": visible_team_picks,
-                    "visible_opp_picks": visible_opp_picks,
-                    "actual_pick": actual_pick,
+                    "draft_sequence": (
+                        draft_sequence[:index] + [0] * (SEQ_LEN - index)
+                    ),
                     "win": win,
                     "is_my_decision": False,
                 }
@@ -87,16 +83,22 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     ]
     prepared_rows = []
     for _, row in dataframe.iterrows():
-        my_pick_index = row.team_picks.index(row.picked_hero)
-        visible_team_picks = row.team_picks[:my_pick_index]
-        visible_opp_picks = row.opponent_picks[
-            : min(visibility_map[my_pick_index], len(row.opponent_picks) - 1)
-        ]
+        team_picks = row.team_picks
+        opp_picks = row.opponent_picks
+        draft_sequence = (
+            team_picks[:2]
+            + opp_picks[:2]
+            + team_picks[2:4]
+            + opp_picks[2:4]
+            + team_picks[4:]
+        )
+        my_pick_index = draft_sequence.index(row.picked_hero)
         prepared_rows.append(
             {
-                "visible_team_picks": visible_team_picks,
-                "visible_opp_picks": visible_opp_picks,
-                "actual_pick": row.picked_hero,
+                "draft_sequence": (
+                    draft_sequence[: my_pick_index + 1]
+                    + [0] * (SEQ_LEN - my_pick_index - 1)
+                ),
                 "win": row.win,
                 "is_my_decision": True,
             }

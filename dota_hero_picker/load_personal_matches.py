@@ -77,75 +77,63 @@ def parse_draft(match, account_id):
     else:
         return None
 
-    your_team = 0 if your_player.get("isRadiant") else 1
-    win = 1 if match.get("radiant_win") == (your_team == 0) else 0
+    your_team = 0 if your_player["isRadiant"] else 1
+    opp_team = 1 - your_team
 
-    if not picks_bans:
-        if not players:
-            return None
-        team_picks = []
-        opp_picks = []
-        for player in players:
-            if player["team_number"] == your_team:
-                team_picks.append(player["hero_id"])
-            else:
-                opp_picks.append(player["hero_id"])
+    radiant_win = match["radiant_win"]
+    win = 1 if radiant_win == (your_team == 0) else 0
 
-        your_hero_id = your_player.get("hero_id")
-
-        return {
-            "team_picks": team_picks,
-            "opponent_picks": opp_picks,
-            "picked_hero": your_hero_id,
-            "win": win,
-            "match_id": match["match_id"],
-            "start_time": match.get("start_time", 0),
-        }
-
-    team_picks = []
-    opp_picks = []
+    your_hero_id = your_player["hero_id"]
 
     actually_picked_heroes = defaultdict(list)
     for player in players:
         actually_picked_heroes[player["team_number"]].append(player["hero_id"])
 
-    all_picks_sorted = sorted(
-        [
+    if not players and not picks_bans:
+        return None
+
+    if not picks_bans:
+        team_picks = actually_picked_heroes[your_team]
+        opp_picks = actually_picked_heroes[opp_team]
+    else:
+        all_picks = [
             p
             for p in picks_bans
-            if p.get("is_pick")
-            and p["hero_id"] in actually_picked_heroes.values()
-        ],
-        key=lambda p: p["order"],
-    )
-    for pick in all_picks_sorted:
-        hero_id = pick["hero_id"]
-        if pick["team"] == your_team:
-            team_picks.append(hero_id)
-        else:
-            opp_picks.append(hero_id)
+            if p["is_pick"]
+            and any(
+                p["hero_id"] == h
+                for team in actually_picked_heroes.values()
+                for h in team
+            )
+        ]
+        all_picks_sorted = sorted(all_picks, key=lambda pick: pick["order"])
 
-    team_missing = list(
-        set(actually_picked_heroes[your_team]) - set(team_picks)
-    )
-    opp_missing = list(
-        set(actually_picked_heroes[1 - your_team]) - set(opp_picks)
-    )
+        team_picks = [
+            p["hero_id"] for p in all_picks_sorted if p["team"] == your_team
+        ]
+        opp_picks = [
+            p["hero_id"] for p in all_picks_sorted if p["team"] == opp_team
+        ]
 
-    team_picks = team_missing + team_picks
-    opp_picks = opp_missing + opp_picks
+        team_missing = [
+            h for h in actually_picked_heroes[your_team] if h not in team_picks
+        ]
+        opp_missing = [
+            h for h in actually_picked_heroes[opp_team] if h not in opp_picks
+        ]
 
-    if len(team_picks + opp_picks) != 10:
+        team_picks = team_missing + team_picks
+        opp_picks = opp_missing + opp_picks
+
+    if len(team_picks) + len(opp_picks) != 10:
         raise RuntimeError("Picks parsing failed")
-
-    your_hero_id = your_player.get("hero_id")
 
     return {
         "team_picks": team_picks,
         "opponent_picks": opp_picks,
         "picked_hero": your_hero_id,
         "win": win,
-        "match_id": match["match_id"],
+        "match_id": match.get("match_id"),
         "start_time": match.get("start_time", 0),
     }
 
