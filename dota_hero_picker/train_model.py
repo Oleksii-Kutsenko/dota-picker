@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def count_trainable_params(model):
+    """Count the number of trainable parameters in a PyTorch model."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
 def set_seed(seed: int = 42):
     """Set random seeds for reproducibility."""
     torch.manual_seed(seed)
@@ -52,14 +57,9 @@ def set_seed(seed: int = 42):
 def create_model() -> WinPredictorWithPositionalAttention:
     return WinPredictorWithPositionalAttention(
         num_heroes,
-        embedding_dim=256,
-        num_heads=16,
+        embedding_dim=32,
         dropout_rate=0.55,
-        hidden_sizes=(
-            4096,
-            32,
-            8,
-        ),
+        hidden_sizes=(32, 32),
     )
 
 
@@ -359,7 +359,7 @@ class EarlyStopping:
         self.patience = patience
         self.delta = delta
         self.best_val_loss: float | None = None
-        self.best_f1_score: float | None = None
+        self.best_metrics: MetricsResult | None = None
         self.early_stop = False
         self.counter = 0
         self.best_model_state: dict | None = None
@@ -367,14 +367,14 @@ class EarlyStopping:
     def __call__(
         self,
         val_loss: float,
-        val_f1_score: float,
+        metrics: MetricsResult,
         model: WinPredictorWithPositionalAttention,
     ) -> None:
         score = -val_loss
 
         if self.best_val_loss is None:
             self.best_val_loss = score
-            self.best_f1_score = val_f1_score
+            self.best_metrics = metrics
             self.best_model_state = model.state_dict()
         elif score < self.best_val_loss + self.delta:
             self.counter += 1
@@ -382,7 +382,7 @@ class EarlyStopping:
                 self.early_stop = True
         else:
             self.best_val_loss = score
-            self.best_f1_score = val_f1_score
+            self.best_metrics = metrics
             self.best_model_state = model.state_dict()
             self.counter = 0
 
@@ -479,7 +479,7 @@ def train_epoch(
     logger.info(val_metrics)
     training_components.scheduler.step(val_metrics.loss)
 
-    training_components.early_stopping(val_metrics.loss, val_metrics.f1, model)
+    training_components.early_stopping(val_metrics.loss, val_metrics, model)
 
 
 def train_model(
@@ -530,16 +530,14 @@ def train_model(
 
     if (
         training_components.early_stopping.best_val_loss is None
-        or training_components.early_stopping.best_f1_score is None
-        or training_components.early_stopping.best_model_state is None
+        or training_components.early_stopping.best_metrics is None
     ):
         msg = "Unexpected state"
         raise RuntimeError(msg)
     model.load_state_dict(training_components.early_stopping.best_model_state)
     return (
         model,
-        -training_components.early_stopping.best_val_loss,
-        training_components.early_stopping.best_f1_score,
+        training_components.early_stopping.best_metrics,
     )
 
 
@@ -605,6 +603,9 @@ class ModelTrainer:
             stratify=tmp_dataframe["win"],
         )
         augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
+        logger.info(
+            f"Number of augmented training examples {len(augmented_train_dataframe)}"
+        )
         prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
         prepared_test_dataframe = prepare_dataframe(test_dataframe)
 
@@ -629,24 +630,27 @@ class ModelTrainer:
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
             ),
-            pos_weight=None,
-            early_stopping_patience=13,
-            epochs=46,
+            pos_weight=pos_weight,
+            early_stopping_patience=9,
+            epochs=68,
             optimizer_parameters=OptimizerParameters(
-                lr=0.0004994948947163486,
-                weight_decay=0.000188288505786014,
+                lr=0.0065148002132055785,
+                weight_decay=0.00021656700741610994,
             ),
             scheduler_parameters=SchedulerParameters(
                 factor=0.15,
-                threshold=0.0022,
-                scheduler_patience=13,
+                threshold=0.0051,
+                scheduler_patience=12,
             ),
-            decision_weight=5,
-            batch_size=128,
+            decision_weight=9,
+            batch_size=16,
         )
 
         model = create_model()
-        trained_model, _, _ = train_model(
+        logger.info(
+            f"Model trainable parameters amounts {count_trainable_params(model)}"
+        )
+        trained_model, _ = train_model(
             model,
             training_arguments,
         )

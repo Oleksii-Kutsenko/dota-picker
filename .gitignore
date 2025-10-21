@@ -6,3 +6,5 @@ venv
 .ruff_cache
 __pycache__
 dota_hero_picker/models/*
+optuna_study.db
+training.log
