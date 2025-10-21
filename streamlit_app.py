@@ -159,7 +159,6 @@ def pad_hero_ids(hero_names: list[str]) -> list[int]:
 def evaluate_candidate(
     model: WinPredictorWithPositionalAttention,
     candidate_hero: str,
-    baseline_prob: float,
     team_tensor: torch.Tensor,
     opp_tensor: torch.Tensor,
 ) -> tuple[str, float]:
@@ -191,10 +190,6 @@ def suggest_best_picks(
     opp_tensor = torch.tensor([opp_ids], dtype=torch.long, device=device)
 
     with torch.no_grad():
-        baseline_tensor = torch.tensor([0], dtype=torch.long, device=device)
-        baseline_output = model(team_tensor, opp_tensor, baseline_tensor)
-        baseline_prob = torch.sigmoid(baseline_output).item()
-
         for candidate_hero in heroes:
             if (
                 candidate_hero in team_picks
@@ -210,7 +205,6 @@ def suggest_best_picks(
                 evaluate_candidate(
                     model,
                     candidate_hero,
-                    baseline_prob,
                     team_tensor,
                     opp_tensor,
                 ),

@@ -140,7 +140,8 @@ def create_objective(
 
         trial.set_user_attr("mean_val_loss", mean_val_loss)
         trial.set_user_attr(
-            "model_trainable_params", count_trainable_params(model)
+            "model_trainable_params",
+            count_trainable_params(model),
         )
         trial.set_user_attr("model_val_auc", mean_val_auc)
 
@@ -171,7 +172,9 @@ def main(csv_file_path: str) -> None:
     )
 
     fig1 = optuna.visualization.plot_optimization_history(
-        study, target=lambda trial: trial.values[0], target_name="F1"
+        study,
+        target=lambda trial: trial.values[0],
+        target_name="F1",
     )
     fig1.write_html("optimization_history.html")
 
@@ -179,7 +182,8 @@ def main(csv_file_path: str) -> None:
     fig2.write_html("param_importances.html")
 
     fig3 = optuna.visualization.plot_pareto_front(
-        study, target_names=["F1", "Val Loss", "AUC"]
+        study,
+        target_names=["F1", "Val Loss", "AUC"],
     )
     fig3.write_html("pareto_front.html")
 

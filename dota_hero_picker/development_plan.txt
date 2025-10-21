@@ -1,6 +1,6 @@
 All traning and models will be relevant only for current patch. This decision related to the futher updates, I want to incorporate hero features to the input vector, and it's hard to collect historical heroes features, and incorporate them properly (hero re-works).
 
-Try embedding of roles again. Embedd like [hero, roles, hero, role, hero, role, ...]
+Update input vector—fetch from OpenDota heroes.json (roles, abilities for binaries like has_stun/has_dispel; attributes: primary, melee, base stats).
 Optimize hyperparameters: Use Optuna to tune model hyperparameters (e.g., learning rate, embedding dimensions, FM latent factors) with a focus on personalization metrics, running trials on your validation set for 50-100 iterations.
 optimizer_type ('Adam', 'AdamW', 'SGD', 'RMSprop')
 momentum (0.0 to 0.99)
@@ -12,7 +12,7 @@ weight_init
 scheduler_type
 dropout rate per layer, per attention
 
-Update input vector—fetch from OpenDota heroes.json (roles, abilities for binaries like has_stun/has_dispel; attributes: primary, melee, base stats).
+Try embedding of roles again. Embedd like [hero, roles, hero, role, hero, role, ...]
 Attributes divide into categorical (e.g., primary_attribute [str/agi/int], attack_type [melee/ranged], encoded as one-hot binaries like , batch_size x 10 x 6-8) and numerical (e.g., base_damage [0-100 normalized], armor [0-20], move_speed [0-350], base_hp [0-800], as floats, batch_size x 10 x 4), concatenated for projection. Roles are multi-label strings per hero (e.g., ["Carry","Escape","Nuker"] from ~20-30 vocab), individually embedded (nn.Embedding(num_roles, 16)) and averaged to a 16-dim vector per hero (batch_size x 10 x 16), enabling relational modeling like gank team synergies. Preprocessing uses MinMax for numericals and handles empty roles as zeros, resulting in ~90 dims per hero for fusion.
 Incorporate hero roles into input vectors: Good idea go through skills and check Stuns, Root, Silence, Slow, Hex, Taunt, Sleep, AoE skills, pure damage, has break, has dispel, provide vision, is invisible, and so on. STR, IS_Melee
 Update input vector—fetch from OpenDota heroes.json (roles, abilities for binaries like has_stun/has_dispel; attributes: primary, melee, base stats e.g., base_damage [0-100 normalized], armor [0-20], move_speed [0-350], base_hp [0-800], as floats). Preprocessing uses MinMax for numericals and handles empty roles as zeros.
