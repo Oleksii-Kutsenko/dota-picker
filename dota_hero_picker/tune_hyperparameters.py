@@ -16,7 +16,6 @@ from dota_hero_picker.train_model import (
     compute_pos_weight,
     count_trainable_params,
     load_personal_matches,
-    set_seed,
     train_model,
 )
 
@@ -31,8 +30,6 @@ from .neural_network import (
 
 logger = logging.getLogger(__name__)
 
-set_seed(42)
-
 
 def create_objective(
     model_trainer: ModelTrainer,
@@ -44,11 +41,11 @@ def create_objective(
         learning_rate = trial.suggest_float("lr", 1e-6, 1e-2, log=True)
         weight_decay = trial.suggest_float(
             "weight_decay",
-            1e-5,
-            1e-1,
+            1e-6,
+            1,
             log=True,
         )
-        scheduler_patience = trial.suggest_int("scheduler_patience", 5, 20)
+        scheduler_patience = trial.suggest_int("scheduler_patience", 5, 25)
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
             5,
@@ -56,7 +53,7 @@ def create_objective(
         )
         epochs = trial.suggest_int("epochs", 1, 50)
         factor = trial.suggest_float("factor", 0.1, 0.5, step=0.05)
-        threshold = trial.suggest_float("threshold", 1e-4, 1e-2, step=1e-4)
+        threshold = trial.suggest_float("threshold", 1e-5, 1e-2, step=1e-4)
         use_pos_weight = trial.suggest_categorical(
             "use_pos_weight",
             [True, False],
@@ -67,35 +64,21 @@ def create_objective(
             "batch_size", [8, 16, 32, 64, 128]
         )
 
-        dropout_rate = trial.suggest_float("dropout_rate", 0.0, 0.6, step=0.05)
-        embedding_dim = trial.suggest_categorical(
-            "embedding_dim",
-            [
-                8,
-                16,
-                32,
-            ],
-        )
+        dropout_rate = trial.suggest_float("dropout_rate", 0.0, 0.7, step=0.05)
+        embedding_dim = trial.suggest_int("embedding_dim", 8, 32)
 
         n_layers = trial.suggest_int("n_layers", 1, 4)
-        all_options = [1, 2, 4, 8, 16, 32, 64]
         layer_sizes = []
         for i in range(n_layers):
             layer_sizes.append(
-                trial.suggest_categorical(
+                trial.suggest_int(
                     f"layer_{i}_size",
-                    all_options,
+                    1,
+                    64,
                 )
             )
 
-        model = WinPredictorWithPositionalAttention(
-            num_heroes,
-            embedding_dim,
-            tuple(layer_sizes),
-            dropout_rate,
-        )
-
-        skf = StratifiedKFold(n_splits=5, shuffle=True)
+        skf = StratifiedKFold(n_splits=3, shuffle=True)
         folds_val_f1 = []
         folds_val_loss = []
         folds_val_auc = []
@@ -111,6 +94,13 @@ def create_objective(
             prepared_val = prepare_dataframe(val_df)
             train_dataset = DotaDataset(augmented_train)
             val_dataset = DotaDataset(prepared_val)
+
+            model = WinPredictorWithPositionalAttention(
+                num_heroes,
+                embedding_dim,
+                tuple(layer_sizes),
+                dropout_rate,
+            )
 
             training_arguments = TrainingArguments(
                 data=TrainingData(

@@ -44,22 +44,12 @@ def count_trainable_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def set_seed(seed: int = 42):
-    """Set random seeds for reproducibility."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
 def create_model() -> WinPredictorWithPositionalAttention:
     return WinPredictorWithPositionalAttention(
         num_heroes,
         embedding_dim=32,
-        dropout_rate=0.55,
-        hidden_sizes=(32, 32),
+        dropout_rate=0.6,
+        hidden_sizes=(32,),
     )
 
 
@@ -630,20 +620,20 @@ class ModelTrainer:
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
             ),
-            pos_weight=pos_weight,
-            early_stopping_patience=9,
-            epochs=68,
+            pos_weight=None,
+            early_stopping_patience=5,
+            epochs=31,
             optimizer_parameters=OptimizerParameters(
-                lr=0.0065148002132055785,
-                weight_decay=0.00021656700741610994,
+                lr=0.01,
+                weight_decay=1.10381875128313e-05,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.15,
-                threshold=0.0051,
-                scheduler_patience=12,
+                factor=0.25,
+                threshold=0.0001,
+                scheduler_patience=20,
             ),
-            decision_weight=9,
-            batch_size=16,
+            decision_weight=7,
+            batch_size=8,
         )
 
         model = create_model()
