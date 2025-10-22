@@ -73,10 +73,6 @@ class DotaDataset(Dataset[TrainingExample]):
 
         return (
             torch.tensor(row["draft_sequence"], dtype=torch.long),
-            torch.tensor(
-                row["is_melee_sequence"],
-                dtype=torch.float,
-            ).unsqueeze(-1),
             torch.tensor(row["win"], dtype=torch.float),
             torch.tensor(row.get("is_my_decision", 0.0), dtype=torch.float),
         )
@@ -133,10 +129,8 @@ def process_evaluation_batch(
     batch_data,
     criterion,
 ):
-    draft_sequence, is_melee_sequence, is_win, _ = [
-        t.to(device) for t in batch_data
-    ]
-    outputs = model(draft_sequence, is_melee_sequence)
+    draft_sequence, is_win, _ = [t.to(device) for t in batch_data]
+    outputs = model(draft_sequence)
     per_sample_loss = criterion(outputs, is_win)
 
     loss = (per_sample_loss).mean()
@@ -154,11 +148,9 @@ def process_training_batch(
     Process a single batch: forward pass, loss computation,
     and optimization step.
     """
-    draft_sequence, is_melee_sequence, is_win, is_my_decision = [
-        t.to(device) for t in batch_data
-    ]
+    draft_sequence, is_win, is_my_decision = [t.to(device) for t in batch_data]
     training_components.optimizer.zero_grad()
-    outputs = model(draft_sequence, is_melee_sequence)
+    outputs = model(draft_sequence)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
     weights = torch.where(
@@ -675,19 +667,19 @@ class ModelTrainer:
                 val_dataset=val_dataset,
             ),
             pos_weight=None,
-            early_stopping_patience=19,
-            epochs=43,
+            early_stopping_patience=5,
+            epochs=30,
             optimizer_parameters=OptimizerParameters(
-                lr=0.000171071120586148,
-                weight_decay=1,
+                lr=9.3483161282681e-05,
+                weight_decay=0.72995888183633,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.5,
-                threshold=0.00321,
-                scheduler_patience=25,
+                factor=0.45,
+                scheduler_patience=21,
+                threshold=0.03471,
             ),
-            decision_weight=10,
-            batch_size=8,
+            decision_weight=9,
+            batch_size=128,
         )
 
     @staticmethod
@@ -695,9 +687,10 @@ class ModelTrainer:
         return RNNWinPredictor(
             NNParameters(
                 num_heroes=num_heroes,
-                embedding_dim=34,
-                gru_hidden_dim=27,
-                num_gru_layers=2,
-                dropout_rate=0.8,
+                embedding_dim=39,
+                gru_hidden_dim=142,
+                num_gru_layers=1,
+                dropout_rate=0.6,
+                bidirectional=True,
             )
         )

@@ -76,7 +76,6 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
             results.append(
                 {
                     "draft_sequence": padded_draft_sequence,
-                    "is_melee_sequence": is_melee_sequence,
                     "win": win,
                     "is_my_decision": False,
                 }
@@ -107,7 +106,6 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
         prepared_rows.append(
             {
                 "draft_sequence": padded_draft_sequence,
-                "is_melee_sequence": is_melee_sequence,
                 "win": row.win,
                 "is_my_decision": True,
             }
