@@ -1,10 +1,12 @@
 import ast
+import json
 import logging
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -29,23 +31,16 @@ from .data_preparation import (
     num_heroes,
     prepare_dataframe,
 )
-from .neural_network import RNNWinPredictor, WinPredictor
+from .neural_network import RNNWinPredictor
 
 logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def count_trainable_params(model: WinPredictor):
+def count_trainable_params(model: RNNWinPredictor):
     """Count the number of trainable parameters in a PyTorch model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def create_model() -> WinPredictor:
-    return RNNWinPredictor(
-        num_heroes,
-        gru_hidden_dim=16,
-    )
 
 
 def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
@@ -70,7 +65,7 @@ def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
     ]
     for column in to_split_columns:
         matches_dataframe[column] = matches_dataframe[column].apply(
-            ast.literal_eval,
+            json.loads,
         )
         matches_dataframe[column] = matches_dataframe[column].apply(
             lambda hero_list: [
@@ -114,6 +109,9 @@ class DotaDataset(Dataset[TrainingExample]):
 
         return (
             torch.tensor(row["draft_sequence"], dtype=torch.long),
+            torch.tensor(
+                row["is_melee_sequence"], dtype=torch.float
+            ).unsqueeze(-1),
             torch.tensor(row["win"], dtype=torch.float),
             torch.tensor(row.get("is_my_decision", 0.0), dtype=torch.float),
         )
@@ -168,22 +166,22 @@ class MetricsResult:
 def process_evaluation_batch(
     model,
     batch_data,
-    decision_weight,
     criterion,
 ):
-    draft_sequence, is_win, is_my_decision = [t.to(device) for t in batch_data]
-    outputs = model(draft_sequence)
+    draft_sequence, is_melee_sequence, is_win, is_my_decision = [
+        t.to(device) for t in batch_data
+    ]
+    outputs = model(draft_sequence, is_melee_sequence)
     per_sample_loss = criterion(outputs, is_win)
 
     mask = is_my_decision == 1.0
-    weights = torch.where(mask, decision_weight, 1.0)
-    loss = (per_sample_loss * weights).mean()
+    loss = (per_sample_loss).mean()
 
     return loss.item(), outputs, is_win
 
 
 def process_training_batch(
-    model: WinPredictor,
+    model: RNNWinPredictor,
     batch_data,
     training_components,
     decision_weight,
@@ -192,9 +190,11 @@ def process_training_batch(
     Process a single batch: forward pass, loss computation,
     and optimization step.
     """
-    draft_sequence, is_win, is_my_decision = [t.to(device) for t in batch_data]
+    draft_sequence, is_melee_sequence, is_win, is_my_decision = [
+        t.to(device) for t in batch_data
+    ]
     training_components.optimizer.zero_grad()
-    outputs = model(draft_sequence)
+    outputs = model(draft_sequence, is_melee_sequence)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
     weights = torch.where(
@@ -211,10 +211,9 @@ def process_training_batch(
 
 
 def evaluate_model(
-    model: WinPredictor,
+    model: RNNWinPredictor,
     loader: DataLoader[DotaDataset],
     criterion: nn.BCEWithLogitsLoss,
-    decision_weight: float,
 ) -> tuple[MetricsResult, np.ndarray]:
     model.eval()
 
@@ -229,7 +228,6 @@ def evaluate_model(
             batch_loss, outputs, is_win = process_evaluation_batch(
                 model,
                 batch_data,
-                decision_weight,
                 criterion,
             )
 
@@ -254,7 +252,7 @@ def evaluate_model(
 
 
 def train_step(
-    model: WinPredictor,
+    model: RNNWinPredictor,
     train_loader,
     training_components,
     decision_weight,
@@ -296,10 +294,10 @@ def train_step(
 
 
 def calculate_metrics(
-    y_true,
-    y_pred,
-    y_proba,
-    loss,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_proba: np.ndarray,
+    loss: float,
 ) -> MetricsResult:
     accuracy = accuracy_score(y_true, y_pred)
     precision = precision_score(
@@ -336,13 +334,13 @@ class EarlyStopping:
         self.best_metrics: MetricsResult | None = None
         self.early_stop = False
         self.counter = 0
-        self.best_model_state: dict | None = None
+        self.best_model_state: dict[str, Any] | None = None
 
     def __call__(
         self,
         val_loss: float,
         metrics: MetricsResult,
-        model: WinPredictor,
+        model: RNNWinPredictor,
     ) -> None:
         score = -val_loss
 
@@ -360,7 +358,9 @@ class EarlyStopping:
             self.best_model_state = model.state_dict()
             self.counter = 0
 
-    def load_best_model(self, model) -> None:
+    def load_best_model(self, model: RNNWinPredictor) -> None:
+        if self.best_model_state is None:
+            raise RuntimeError("Unexpected state")
         model.load_state_dict(self.best_model_state)
 
 
@@ -399,7 +399,7 @@ class TrainingArguments:
     batch_size: int
     decision_weight: float
     epochs: int
-    data: TrainingData | None = None
+    data: TrainingData
     pos_weight: torch.Tensor | None = None
 
 
@@ -420,7 +420,7 @@ class TrainingComponents:
 
 def train_epoch(
     epoch: int,
-    model: WinPredictor,
+    model: RNNWinPredictor,
     training_arguments: TrainingArguments,
     training_components: TrainingComponents,
 ) -> None:
@@ -448,7 +448,6 @@ def train_epoch(
         model,
         val_loader,
         training_components.criterion,
-        1,
     )
     logger.info(val_metrics)
     training_components.scheduler.step(val_metrics.loss)
@@ -457,9 +456,9 @@ def train_epoch(
 
 
 def train_model(
-    model: WinPredictor,
+    model: RNNWinPredictor,
     training_arguments: TrainingArguments,
-) -> tuple[WinPredictor, MetricsResult]:
+) -> tuple[RNNWinPredictor, MetricsResult]:
     model.to(device)
 
     if training_arguments.pos_weight:
@@ -528,12 +527,14 @@ def compute_baseline_f1(
     y_pred_baseline = [majority_class] * len(y_val)
 
     # Compute F1-score for the baseline (using pos_label=1 for win prediction)
-    baseline_f1: float = f1_score(y_val, y_pred_baseline, pos_label=1)
+    baseline_f1: float = f1_score(
+        y_val, y_pred_baseline, pos_label=majority_class
+    )
 
     # Also compute class distribution for context
-    train_dist = {k: v / len(y_train) for k, v in counter.items()}
+    train_dist = {k: round(v / len(y_train), 4) for k, v in counter.items()}
     val_counter = Counter(y_val)
-    val_dist = {k: v / len(y_val) for k, v in val_counter.items()}
+    val_dist = {k: round(v / len(y_val), 4) for k, v in val_counter.items()}
 
     logger.info(
         "Baseline F1-score "
@@ -600,28 +601,11 @@ class ModelTrainer:
             self.prepare_datasets()
         )
 
-        training_arguments = TrainingArguments(
-            data=TrainingData(
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-            ),
-            pos_weight=None,
-            early_stopping_patience=5,
-            epochs=31,
-            optimizer_parameters=OptimizerParameters(
-                lr=0.01,
-                weight_decay=1.10381875128313e-05,
-            ),
-            scheduler_parameters=SchedulerParameters(
-                factor=0.25,
-                threshold=0.0001,
-                scheduler_patience=20,
-            ),
-            decision_weight=7,
-            batch_size=8,
+        training_arguments = self.create_training_arguments(
+            train_dataset, val_dataset
         )
 
-        model = create_model()
+        model = self.create_model()
         logger.info(
             f"Model trainable parameters: {count_trainable_params(model)}",
         )
@@ -646,7 +630,6 @@ class ModelTrainer:
                 ShuffleEnum.UNSHUFFLED,
             ),
             criterion,
-            1,
         )
 
         logger.info("Test Metrics")
@@ -674,3 +657,38 @@ class ModelTrainer:
         logger.info(
             "Training complete! Model saved as 'trained_model.pth'.",
         )
+
+    def create_training_arguments(
+        self, train_dataset, val_dataset
+    ) -> TrainingArguments:
+        return TrainingArguments(
+            data=TrainingData(
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+            ),
+            pos_weight=None,
+            early_stopping_patience=19,
+            epochs=43,
+            optimizer_parameters=OptimizerParameters(
+                lr=0.000171071120586148,
+                weight_decay=1,
+            ),
+            scheduler_parameters=SchedulerParameters(
+                factor=0.5,
+                threshold=0.00321,
+                scheduler_patience=25,
+            ),
+            decision_weight=10,
+            batch_size=8,
+        )
+
+    @staticmethod
+    def create_model() -> RNNWinPredictor:
+        return RNNWinPredictor(
+            num_heroes,
+            embedding_dim=34,
+            gru_hidden_dim=27,
+            num_gru_layers=2,
+            dropout_rate=0.8,
+        )
+

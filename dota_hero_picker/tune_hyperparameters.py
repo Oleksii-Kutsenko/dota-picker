@@ -1,13 +1,17 @@
 import logging
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import optuna
+import optunahub
+import pandas as pd
 from optuna import Trial
 from sklearn.model_selection import StratifiedKFold
 
 from dota_hero_picker.train_model import (
     DotaDataset,
+    MetricsResult,
     ModelTrainer,
     OptimizerParameters,
     SchedulerParameters,
@@ -25,15 +29,19 @@ from .data_preparation import (
     prepare_dataframe,
 )
 from .neural_network import (
-    WinPredictor,
+    RNNWinPredictor,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def perform_fold(
-    matches_dataframe, train_idx, val_idx, model, training_arguments
-):
+    matches_dataframe: pd.DataFrame,
+    train_idx: list[int],
+    val_idx: list[int],
+    model: RNNWinPredictor,
+    training_arguments: TrainingArguments,
+) -> MetricsResult:
     train_df = matches_dataframe.iloc[train_idx]
     val_df = matches_dataframe.iloc[val_idx]
 
@@ -55,12 +63,13 @@ def perform_fold(
 
 
 def perform_cross_validation(
-    matches_dataframe,
-    training_arguments,
-    embedding_dim,
-    dropout_rate,
-    layer_sizes,
-):
+    matches_dataframe: pd.DataFrame,
+    training_arguments: TrainingArguments,
+    embedding_dim: int,
+    gru_hidden_dim: int,
+    num_gru_layers: int,
+    dropout_rate: float,
+) -> tuple[np.floating[Any], np.floating[Any], np.floating[Any], int]:
     skf = StratifiedKFold(n_splits=3, shuffle=True)
     folds_val_f1 = []
     folds_val_loss = []
@@ -70,10 +79,11 @@ def perform_cross_validation(
         matches_dataframe,
         matches_dataframe["win"],
     ):
-        model = WinPredictor(
+        model = RNNWinPredictor(
             num_heroes,
             embedding_dim,
-            tuple(layer_sizes),
+            gru_hidden_dim,
+            num_gru_layers,
             dropout_rate,
         )
 
@@ -104,25 +114,21 @@ def create_objective(
             [True, False],
         )
 
-        dropout_rate = trial.suggest_float("dropout_rate", 0.0, 0.7, step=0.05)
-        embedding_dim = trial.suggest_int("embedding_dim", 8, 32)
-
-        n_layers = trial.suggest_int("n_layers", 1, 4)
-        layer_sizes = [
-            trial.suggest_int(
-                f"layer_{i}_size",
-                1,
-                64,
-            )
-            for i in range(n_layers)
-        ]
+        embedding_dim = trial.suggest_int("embedding_dim", 4, 64)
+        gru_hidden_dim = trial.suggest_int("gru_hidden_dim", 4, 256)
+        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 4)
+        dropout_rate = trial.suggest_float("dropout_rate", 0.0, 0.8, step=0.05)
 
         training_arguments = TrainingArguments(
+            data=TrainingData(
+                train_dataset=DotaDataset(pd.DataFrame()),
+                val_dataset=DotaDataset(pd.DataFrame()),
+            ),
             pos_weight=pos_weight if use_pos_weight else None,
             early_stopping_patience=(
                 trial.suggest_int(
                     "early_stopping_patience",
-                    5,
+                    4,
                     19,
                 )
             ),
@@ -135,11 +141,11 @@ def create_objective(
                     log=True,
                 ),
             ),
-            epochs=trial.suggest_int("epochs", 1, 50),
+            epochs=trial.suggest_int("epochs", 2, 50),
             scheduler_parameters=SchedulerParameters(
-                factor=trial.suggest_float("factor", 0.1, 0.5, step=0.05),
+                factor=trial.suggest_float("factor", 0.1, 0.6, step=0.05),
                 threshold=trial.suggest_float(
-                    "threshold", 1e-5, 1e-2, step=1e-4
+                    "threshold", 1e-5, 1e-1, step=1e-4
                 ),
                 scheduler_patience=trial.suggest_int(
                     "scheduler_patience", 5, 25
@@ -147,9 +153,9 @@ def create_objective(
             ),
             batch_size=trial.suggest_categorical(
                 "batch_size",
-                [8, 16, 32, 64, 128],
+                [4, 8, 16, 32, 64, 128],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 1, 10),
+            decision_weight=trial.suggest_int("decision_weight", 1, 11),
         )
 
         mean_f1, mean_val_loss, mean_val_auc, trainable_params = (
@@ -157,8 +163,9 @@ def create_objective(
                 matches_dataframe,
                 training_arguments,
                 embedding_dim,
+                gru_hidden_dim,
+                num_gru_layers,
                 dropout_rate,
-                layer_sizes,
             )
         )
 
@@ -181,17 +188,18 @@ def main(csv_file_path: str) -> None:
     model_trainer = ModelTrainer(csv_file_path)
     objective = create_objective(model_trainer)
 
+    module = optunahub.load_module(package="samplers/auto_sampler")
     study = optuna.create_study(
         study_name="dota_win_predictor",
         directions=["maximize", "minimize", "maximize"],
-        sampler=optuna.samplers.GPSampler(),
+        sampler=module.AutoSampler(),
         storage="sqlite:///optuna_study.db",
         load_if_exists=True,
     )
 
     study.optimize(
         objective,
-        n_trials=90,
+        n_trials=200,
         show_progress_bar=True,
     )
 

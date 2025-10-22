@@ -8,3 +8,8 @@ __pycache__
 dota_hero_picker/models/*
 optuna_study.db
 training.log
+.idea
+optimization_history.html
+optuna_trials.csv
+param_importances.html
+pareto_front.html

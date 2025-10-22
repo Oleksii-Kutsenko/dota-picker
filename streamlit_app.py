@@ -7,9 +7,10 @@ import settings
 from dota_hero_picker.data_preparation import (
     MAX_PICK,
     hero_name_2_model_id,
+    model_id_2_hero_data,
 )
 from dota_hero_picker.load_personal_matches import get_hero_data
-from dota_hero_picker.neural_network import WinPredictor
+from dota_hero_picker.neural_network import RNNWinPredictor
 from dota_hero_picker.train_model import create_model
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -146,36 +147,69 @@ hero_positions = {
 
 heroes = [hero_data_item["localized_name"] for hero_data_item in hero_data]
 num_heroes = len(heroes)
-hero_to_id = {hero: idx for idx, hero in enumerate(heroes)}
-id_to_hero = {idx: hero for hero, idx in hero_to_id.items()}
+
+
+def build_draft_sequence(
+    team_picks: list[str],
+    opponent_picks: list[str],
+    candidate: str | None = None,
+) -> list[int]:
+    team_picks = [h for h in team_picks if h in hero_name_2_model_id]
+    if candidate:
+        team_picks.append(candidate)
+    opponent_picks = [h for h in opponent_picks if h in hero_name_2_model_id]
+
+    team_ids = [hero_name_2_model_id[h] for h in team_picks]
+    opp_ids = [hero_name_2_model_id[h] for h in opponent_picks]
+
+    team_ids += [0] * (MAX_PICK - len(team_ids))
+    opp_ids += [0] * (4 - len(opp_ids))
+
+    return (
+        team_ids[:2]
+        + opp_ids[:2]
+        + team_ids[2:4]
+        + opp_ids[2:4]
+        + team_ids[4:]
+    )
 
 
 def pad_hero_ids(hero_names: list[str]) -> list[int]:
-    ids = [hero_to_id[name] for name in hero_names]
+    ids = [hero_name_2_model_id[name] for name in hero_names]
     padded = ids + [0] * (MAX_PICK - len(ids))
     return padded[:MAX_PICK]
 
 
 def evaluate_candidate(
-    model: WinPredictor,
+    model: RNNWinPredictor,
     candidate_hero: str,
-    team_tensor: torch.Tensor,
-    opp_tensor: torch.Tensor,
+    team_picks: list[str],
+    opponent_picks: list[str],
 ) -> tuple[str, float]:
-    candidate_id = hero_name_2_model_id[candidate_hero]
-
-    actual_pick_tensor = torch.tensor(
-        [candidate_id],
-        dtype=torch.long,
-        device=device,
+    draft_ids = build_draft_sequence(
+        team_picks,
+        opponent_picks,
+        candidate_hero,
     )
-    output = model(team_tensor, opp_tensor, actual_pick_tensor)
-    prob = torch.sigmoid(output).item()
+    is_melee_sequence = [
+        model_id_2_hero_data.get(hero_id, {"is_melee": -1})["is_melee"]
+        for hero_id in draft_ids
+    ]
+    draft_tensor = torch.tensor([draft_ids], dtype=torch.long, device=device)
+    is_melee_tensor = torch.tensor(
+        [is_melee_sequence], dtype=torch.long, device=device
+    ).unsqueeze(-1)
+
+    model.eval()
+    with torch.no_grad():
+        logits = model(draft_tensor, is_melee_tensor)
+        prob = torch.sigmoid(logits).item()
+
     return (candidate_hero, prob)
 
 
 def suggest_best_picks(
-    model: WinPredictor,
+    model: RNNWinPredictor,
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],
@@ -183,32 +217,22 @@ def suggest_best_picks(
 ) -> list[tuple[str, float]]:
     model.eval()
     results = []
+    for candidate_hero in heroes:
+        if candidate_hero in team_picks or candidate_hero in opponent_picks:
+            continue
 
-    team_ids = pad_hero_ids(team_picks)
-    opp_ids = pad_hero_ids(opponent_picks)
-    team_tensor = torch.tensor([team_ids], dtype=torch.long, device=device)
-    opp_tensor = torch.tensor([opp_ids], dtype=torch.long, device=device)
+        hero_pos = hero_positions.get(candidate_hero, [1, 2, 3, 4, 5])
+        if not any(pos in allowed_positions for pos in hero_pos):
+            continue
 
-    with torch.no_grad():
-        for candidate_hero in heroes:
-            if (
-                candidate_hero in team_picks
-                or candidate_hero in opponent_picks
-            ):
-                continue
-
-            hero_pos = hero_positions.get(candidate_hero, [1, 2, 3, 4, 5])
-            if not set(hero_pos) & set(allowed_positions):
-                continue
-
-            results.append(
-                evaluate_candidate(
-                    model,
-                    candidate_hero,
-                    team_tensor,
-                    opp_tensor,
-                ),
-            )
+        results.append(
+            evaluate_candidate(
+                model,
+                candidate_hero,
+                team_picks,
+                opponent_picks,
+            ),
+        )
 
     results.sort(key=lambda x: x[1], reverse=True)
     return results[:top_n]
@@ -293,9 +317,13 @@ selected_positions: list[int] = st.sidebar.multiselect(
     default=position_options,
 )
 
+current_seq = build_draft_sequence(
+    team_picks_multiselect,
+    opponent_picks_multiselect,
+)
+
 if st.button("Get Suggestions"):
     try:
-        # Use all positions if none selected
         allowed = (
             selected_positions if selected_positions else position_options
         )
@@ -305,8 +333,32 @@ if st.button("Get Suggestions"):
             opponent_picks_multiselect,
             allowed,
         )
-        st.subheader("Top Suggested Picks")
+        st.subheader("Top Suggested Picks (as next team pick)")
         for idx, (hero, probability) in enumerate(suggestions, 1):
             st.write(f"#{idx} {hero} (Win Prob: {probability * 100:.2f}%)")
+        baseline_ids = build_draft_sequence(
+            team_picks_multiselect,
+            opponent_picks_multiselect,
+        )
+        is_melee_sequence = [
+            model_id_2_hero_data.get(hero_id, {"is_melee": -1})["is_melee"]
+            for hero_id in baseline_ids
+        ]
+        baseline_tensor = torch.tensor(
+            [baseline_ids],
+            dtype=torch.long,
+            device=device,
+        )
+        is_melee_tensor = torch.tensor(
+            [is_melee_sequence], dtype=torch.long, device=device
+        ).unsqueeze(-1)
+
+        with torch.no_grad():
+            baseline_logits = loaded_model(baseline_tensor, is_melee_tensor)
+            baseline_prob = torch.sigmoid(baseline_logits).item()
+        st.metric(
+            "Baseline Win Prob (no new pick)",
+            f"{baseline_prob * 100:.2f}%",
+        )
     except ValueError as e:
         st.error(f"Error: {e}")
