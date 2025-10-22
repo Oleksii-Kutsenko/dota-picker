@@ -23,11 +23,12 @@ from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
 
 import settings
+from dota_hero_picker.hero_data_manager import HeroDataManager
 
 from .data_preparation import (
     api_id_2_model_id,
     create_augmented_dataframe,
-    num_heroes,
+    enrich_dataframe,
     prepare_dataframe,
 )
 from .neural_network import NNParameters, RNNWinPredictor
@@ -40,42 +41,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def count_trainable_params(model: RNNWinPredictor):
     """Count the number of trainable parameters in a PyTorch model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
-    if not Path(csv_file_path).exists():
-        msg = f"CSV file not found: {csv_file_path}"
-        raise FileNotFoundError(msg)
-
-    matches_dataframe = pd.read_csv(
-        csv_file_path,
-        converters={
-            "team_picks": str,
-            "opponent_picks": str,
-        },
-        dtype={
-            "win": int,
-            "picked_hero": int,
-        },
-    )
-    to_split_columns = [
-        "team_picks",
-        "opponent_picks",
-    ]
-    for column in to_split_columns:
-        matches_dataframe[column] = matches_dataframe[column].apply(
-            json.loads,
-        )
-        matches_dataframe[column] = matches_dataframe[column].apply(
-            lambda hero_list: [
-                api_id_2_model_id[api_id] for api_id in hero_list
-            ],
-        )
-    matches_dataframe["picked_hero"] = matches_dataframe["picked_hero"].apply(
-        lambda api_id: api_id_2_model_id[api_id],
-    )
-
-    return matches_dataframe
 
 
 TrainingExample = tuple[
@@ -561,11 +526,50 @@ class ModelTrainer:
 
     def __init__(self, csv_file_path: str) -> None:
         self.csv_file_path = csv_file_path
+        self.hero_data_manager = HeroDataManager()
+
+    def create_matches_dataframe(self) -> pd.DataFrame:
+        if not Path(self.csv_file_path).exists():
+            msg = f"CSV file not found: {self.csv_file_path}"
+            raise FileNotFoundError(msg)
+
+        matches_dataframe = pd.read_csv(
+            self.csv_file_path,
+            converters={
+                "team_picks": str,
+                "opponent_picks": str,
+            },
+            dtype={
+                "win": int,
+                "picked_hero": int,
+            },
+        )
+        pick_columns = [
+            "team_picks",
+            "opponent_picks",
+        ]
+        for column in pick_columns:
+            matches_dataframe[column] = matches_dataframe[column].apply(
+                json.loads,
+            )
+            matches_dataframe[column] = matches_dataframe[column].apply(
+                lambda hero_list: [
+                    self.hero_data_manager.api_id_2_model_id[api_id]
+                    for api_id in hero_list
+                ],
+            )
+        matches_dataframe["picked_hero"] = matches_dataframe[
+            "picked_hero"
+        ].apply(
+            lambda api_id: self.hero_data_manager.api_id_2_model_id[api_id],
+        )
+
+        return matches_dataframe
 
     def prepare_datasets(
         self,
     ) -> tuple[DotaDataset, DotaDataset, DotaDataset, torch.Tensor]:
-        matches_dataframe = load_personal_matches(self.csv_file_path)
+        matches_dataframe = self.create_matches_dataframe()
         pos_weight = compute_pos_weight(matches_dataframe)
 
         train_dataframe, tmp_dataframe = train_test_split(
@@ -579,6 +583,7 @@ class ModelTrainer:
             stratify=tmp_dataframe["win"],
         )
         augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
+        enrich_dataframe(augmented_train_dataframe)
         logger.info(
             f"Size of augmented dataset {len(augmented_train_dataframe)}",
         )

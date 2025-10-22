@@ -13,6 +13,8 @@ class HeroDataManager:
         self.raw_hero_data = self.get_hero_data(
             HEROES_FILE, API_HEROES_ENDPOINT
         )
+        self.api_id_2_model_id = {}
+        self.model_id_2_hero_data = {}
         self.hero_data = self.process_hero_data()
 
     @staticmethod
@@ -33,4 +35,10 @@ class HeroDataManager:
 
     def process_hero_data(self):
         for model_id, raw_hero_data in enumerate(self.raw_hero_data):
-            breakpoint()
+            self.api_id_2_model_id[raw_hero_data["id"]] = model_id
+            hero_data = {
+                "is_melee": True
+                if raw_hero_data["attack_type"] == "Melee"
+                else False
+            }
+            self.model_id_2_hero_data[model_id] = hero_data
