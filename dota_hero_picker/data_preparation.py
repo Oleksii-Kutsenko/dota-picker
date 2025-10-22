@@ -2,6 +2,8 @@ import logging
 
 import pandas as pd
 
+from dota_hero_picker.hero_data_manager import HeroDataManager
+
 from .load_personal_matches import get_hero_data
 from .neural_network import SEQ_LEN
 

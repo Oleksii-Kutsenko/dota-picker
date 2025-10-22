@@ -19,14 +19,14 @@ classifiers = [
 ]
 dependencies = [
   "click>=8.3,<9",
+  "cmaes>=0.12,<0.13",
   "optuna>=4.5,<5",
+  "optunahub>=0.3.1,<0.4",
   "pandas>=2.3.3,<3",
   "plotly>=6.3.1,<7",
   "scikit-learn>=1.7.2,<2",
   "streamlit>=1.50,<2",
   "torch>=2.8,<3",
-  "optunahub (>=0.3.1,<0.4.0)",
-  "cmaes (>=0.12.0,<0.13.0)",
 ]
 
 [dependency-groups]
@@ -374,7 +374,7 @@ indent-string = "    "
 max-line-length = 100
 
 # Maximum number of lines in a module.
-max-module-lines = 1000
+max-module-lines = 600
 
 # Allow the body of a class to be on the same line as the declaration if body
 # contains single statement.

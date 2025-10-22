@@ -1,4 +1,3 @@
-import ast
 import json
 import logging
 from collections import Counter
@@ -31,7 +30,7 @@ from .data_preparation import (
     num_heroes,
     prepare_dataframe,
 )
-from .neural_network import RNNWinPredictor
+from .neural_network import NNParameters, RNNWinPredictor
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +109,8 @@ class DotaDataset(Dataset[TrainingExample]):
         return (
             torch.tensor(row["draft_sequence"], dtype=torch.long),
             torch.tensor(
-                row["is_melee_sequence"], dtype=torch.float
+                row["is_melee_sequence"],
+                dtype=torch.float,
             ).unsqueeze(-1),
             torch.tensor(row["win"], dtype=torch.float),
             torch.tensor(row.get("is_my_decision", 0.0), dtype=torch.float),
@@ -136,7 +136,7 @@ def get_data_loader(
 class MetricsResult:
     """Training metrics."""
 
-    loss: float
+    loss: np.floating[Any]
     accuracy: float
     precision: float
     recall: float
@@ -144,7 +144,7 @@ class MetricsResult:
     auc: float
     confusion_matrix: np.ndarray | None = None
 
-    def to_dict(self) -> dict[str, float]:
+    def to_dict(self) -> dict[str, float | np.floating[Any]]:
         return {
             "loss": self.loss,
             "accuracy": self.accuracy,
@@ -168,13 +168,12 @@ def process_evaluation_batch(
     batch_data,
     criterion,
 ):
-    draft_sequence, is_melee_sequence, is_win, is_my_decision = [
+    draft_sequence, is_melee_sequence, is_win, _ = [
         t.to(device) for t in batch_data
     ]
     outputs = model(draft_sequence, is_melee_sequence)
     per_sample_loss = criterion(outputs, is_win)
 
-    mask = is_my_decision == 1.0
     loss = (per_sample_loss).mean()
 
     return loss.item(), outputs, is_win
@@ -251,17 +250,73 @@ def evaluate_model(
     return metrics, np.array(all_probs)
 
 
+class EarlyStopping:
+    """Simple early stopping."""
+
+    def __init__(self, patience: int = 5, delta: float = 0) -> None:
+        self.patience = patience
+        self.delta = delta
+        self.best_val_loss: np.floating[Any] | None = None
+        self.best_metrics: MetricsResult | None = None
+        self.early_stop = False
+        self.counter = 0
+        self.best_model_state: dict[str, Any] | None = None
+
+    def __call__(
+        self,
+        val_loss: np.floating[Any],
+        metrics: MetricsResult,
+        model: RNNWinPredictor,
+    ) -> None:
+        score = -val_loss
+
+        if self.best_val_loss is None:
+            self.best_val_loss = score
+            self.best_metrics = metrics
+            self.best_model_state = model.state_dict()
+        elif score < self.best_val_loss + self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_val_loss = score
+            self.best_metrics = metrics
+            self.best_model_state = model.state_dict()
+            self.counter = 0
+
+    def load_best_model(self, model: RNNWinPredictor) -> None:
+        if self.best_model_state is None:
+            msg = "Unexpected state"
+            raise RuntimeError(msg)
+        model.load_state_dict(self.best_model_state)
+
+
+@dataclass
+class TrainingComponents:
+    """Components for training."""
+
+    criterion: nn.BCEWithLogitsLoss
+    optimizer: optim.Adam
+    scheduler: optim.lr_scheduler.ReduceLROnPlateau
+    early_stopping: EarlyStopping
+    callbacks: list[Callable[[None], None]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.callbacks is None:
+            self.callbacks = []
+
+
 def train_step(
     model: RNNWinPredictor,
-    train_loader,
-    training_components,
-    decision_weight,
+    train_loader: DataLoader,
+    training_components: TrainingComponents,
+    decision_weight: int,
 ) -> tuple[MetricsResult, np.ndarray]:
     model.train()
 
     all_losses = []
     all_preds = []
-    all_probs = []
+    all_probs: list[np.floating] = []
     all_labels = []
     mid_point = 0.5
 
@@ -282,13 +337,11 @@ def train_step(
         all_preds.extend(preds)
         all_labels.extend(is_win.cpu().numpy().flatten())
 
-    avg_train_loss = np.mean(all_losses)
-
     metrics = calculate_metrics(
         y_true=np.array(all_labels),
         y_pred=np.array(all_preds),
         y_proba=np.array(all_probs),
-        loss=avg_train_loss,
+        loss=np.mean(all_losses),
     )
     return metrics, np.array(all_probs)
 
@@ -297,7 +350,7 @@ def calculate_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     y_proba: np.ndarray,
-    loss: float,
+    loss: np.floating[Any],
 ) -> MetricsResult:
     accuracy = accuracy_score(y_true, y_pred)
     precision = precision_score(
@@ -322,46 +375,6 @@ def calculate_metrics(
         auc=auc,
         confusion_matrix=cm,
     )
-
-
-class EarlyStopping:
-    """Simple early stopping."""
-
-    def __init__(self, patience: int = 5, delta: float = 0) -> None:
-        self.patience = patience
-        self.delta = delta
-        self.best_val_loss: float | None = None
-        self.best_metrics: MetricsResult | None = None
-        self.early_stop = False
-        self.counter = 0
-        self.best_model_state: dict[str, Any] | None = None
-
-    def __call__(
-        self,
-        val_loss: float,
-        metrics: MetricsResult,
-        model: RNNWinPredictor,
-    ) -> None:
-        score = -val_loss
-
-        if self.best_val_loss is None:
-            self.best_val_loss = score
-            self.best_metrics = metrics
-            self.best_model_state = model.state_dict()
-        elif score < self.best_val_loss + self.delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_val_loss = score
-            self.best_metrics = metrics
-            self.best_model_state = model.state_dict()
-            self.counter = 0
-
-    def load_best_model(self, model: RNNWinPredictor) -> None:
-        if self.best_model_state is None:
-            raise RuntimeError("Unexpected state")
-        model.load_state_dict(self.best_model_state)
 
 
 @dataclass
@@ -401,21 +414,6 @@ class TrainingArguments:
     epochs: int
     data: TrainingData
     pos_weight: torch.Tensor | None = None
-
-
-@dataclass
-class TrainingComponents:
-    """Components for training."""
-
-    criterion: nn.BCEWithLogitsLoss
-    optimizer: optim.Adam
-    scheduler: optim.lr_scheduler.ReduceLROnPlateau
-    early_stopping: EarlyStopping
-    callbacks: list[Callable[[None], None]] | None = None
-
-    def __post_init__(self) -> None:
-        if self.callbacks is None:
-            self.callbacks = []
 
 
 def train_epoch(
@@ -528,7 +526,9 @@ def compute_baseline_f1(
 
     # Compute F1-score for the baseline (using pos_label=1 for win prediction)
     baseline_f1: float = f1_score(
-        y_val, y_pred_baseline, pos_label=majority_class
+        y_val,
+        y_pred_baseline,
+        pos_label=majority_class,
     )
 
     # Also compute class distribution for context
@@ -602,7 +602,8 @@ class ModelTrainer:
         )
 
         training_arguments = self.create_training_arguments(
-            train_dataset, val_dataset
+            train_dataset,
+            val_dataset,
         )
 
         model = self.create_model()
@@ -659,7 +660,9 @@ class ModelTrainer:
         )
 
     def create_training_arguments(
-        self, train_dataset, val_dataset
+        self,
+        train_dataset: DotaDataset,
+        val_dataset: DotaDataset,
     ) -> TrainingArguments:
         return TrainingArguments(
             data=TrainingData(
@@ -685,10 +688,11 @@ class ModelTrainer:
     @staticmethod
     def create_model() -> RNNWinPredictor:
         return RNNWinPredictor(
-            num_heroes,
-            embedding_dim=34,
-            gru_hidden_dim=27,
-            num_gru_layers=2,
-            dropout_rate=0.8,
+            NNParameters(
+                num_heroes=num_heroes,
+                embedding_dim=34,
+                gru_hidden_dim=27,
+                num_gru_layers=2,
+                dropout_rate=0.8,
+            )
         )
-

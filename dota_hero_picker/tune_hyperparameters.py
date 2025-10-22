@@ -29,6 +29,7 @@ from .data_preparation import (
     prepare_dataframe,
 )
 from .neural_network import (
+    NNParameters,
     RNNWinPredictor,
 )
 
@@ -65,10 +66,7 @@ def perform_fold(
 def perform_cross_validation(
     matches_dataframe: pd.DataFrame,
     training_arguments: TrainingArguments,
-    embedding_dim: int,
-    gru_hidden_dim: int,
-    num_gru_layers: int,
-    dropout_rate: float,
+    nn_parameters: NNParameters,
 ) -> tuple[np.floating[Any], np.floating[Any], np.floating[Any], int]:
     skf = StratifiedKFold(n_splits=3, shuffle=True)
     folds_val_f1 = []
@@ -80,15 +78,21 @@ def perform_cross_validation(
         matches_dataframe["win"],
     ):
         model = RNNWinPredictor(
-            num_heroes,
-            embedding_dim,
-            gru_hidden_dim,
-            num_gru_layers,
-            dropout_rate,
+            NNParameters(
+                num_heroes=nn_parameters.num_heroes,
+                embedding_dim=nn_parameters.embedding_dim,
+                gru_hidden_dim=nn_parameters.gru_hidden_dim,
+                num_gru_layers=nn_parameters.num_gru_layers,
+                dropout_rate=nn_parameters.dropout_rate,
+            ),
         )
 
         metrics = perform_fold(
-            matches_dataframe, train_idx, val_idx, model, training_arguments
+            matches_dataframe,
+            train_idx,
+            val_idx,
+            model,
+            training_arguments,
         )
 
         folds_val_f1.append(metrics.f1)
@@ -145,10 +149,15 @@ def create_objective(
             scheduler_parameters=SchedulerParameters(
                 factor=trial.suggest_float("factor", 0.1, 0.6, step=0.05),
                 threshold=trial.suggest_float(
-                    "threshold", 1e-5, 1e-1, step=1e-4
+                    "threshold",
+                    1e-5,
+                    1e-1,
+                    step=1e-4,
                 ),
                 scheduler_patience=trial.suggest_int(
-                    "scheduler_patience", 5, 25
+                    "scheduler_patience",
+                    5,
+                    25,
                 ),
             ),
             batch_size=trial.suggest_categorical(
@@ -162,10 +171,13 @@ def create_objective(
             perform_cross_validation(
                 matches_dataframe,
                 training_arguments,
-                embedding_dim,
-                gru_hidden_dim,
-                num_gru_layers,
-                dropout_rate,
+                NNParameters(
+                    num_heroes=num_heroes,
+                    embedding_dim=embedding_dim,
+                    gru_hidden_dim=gru_hidden_dim,
+                    num_gru_layers=num_gru_layers,
+                    dropout_rate=dropout_rate,
+                ),
             )
         )
 
@@ -203,9 +215,12 @@ def main(csv_file_path: str) -> None:
         show_progress_bar=True,
     )
 
+    def select_f1(trial: optuna.trial.FrozenTrial) -> float:
+        return float(trial.values[0])  # noqa: PD011
+
     fig1 = optuna.visualization.plot_optimization_history(
         study,
-        target=lambda trial: trial.values[0],
+        target=select_f1,
         target_name="F1",
     )
     fig1.write_html("optimization_history.html")

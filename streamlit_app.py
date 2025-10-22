@@ -11,7 +11,7 @@ from dota_hero_picker.data_preparation import (
 )
 from dota_hero_picker.load_personal_matches import get_hero_data
 from dota_hero_picker.neural_network import RNNWinPredictor
-from dota_hero_picker.train_model import create_model
+from dota_hero_picker.train_model import ModelTrainer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -197,7 +197,9 @@ def evaluate_candidate(
     ]
     draft_tensor = torch.tensor([draft_ids], dtype=torch.long, device=device)
     is_melee_tensor = torch.tensor(
-        [is_melee_sequence], dtype=torch.long, device=device
+        [is_melee_sequence],
+        dtype=torch.long,
+        device=device,
     ).unsqueeze(-1)
 
     model.eval()
@@ -243,7 +245,7 @@ st.title("Dota Picker Web UI")
 model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
 
 if model_path.exists():
-    loaded_model = create_model()
+    loaded_model = ModelTrainer.create_model()
     loaded_model.load_state_dict(torch.load(model_path))
     loaded_model.to(device)
     loaded_model.eval()
@@ -350,7 +352,9 @@ if st.button("Get Suggestions"):
             device=device,
         )
         is_melee_tensor = torch.tensor(
-            [is_melee_sequence], dtype=torch.long, device=device
+            [is_melee_sequence],
+            dtype=torch.long,
+            device=device,
         ).unsqueeze(-1)
 
         with torch.no_grad():
