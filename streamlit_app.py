@@ -153,32 +153,20 @@ def build_draft_sequence(
     opponent_picks: list[str],
     candidate: str | None = None,
 ) -> list[int]:
-    team_picks = [
-        h for h in team_picks if h in hero_data_manager.hero_name_2_model_id
-    ]
+    team_picks = [h for h in team_picks if h in hero_data_manager.local_name_2_model_id]
     if candidate:
         team_picks.append(candidate)
     opponent_picks = [
-        h
-        for h in opponent_picks
-        if h in hero_data_manager.hero_name_2_model_id
+        h for h in opponent_picks if h in hero_data_manager.local_name_2_model_id
     ]
 
-    team_ids = [hero_data_manager.hero_name_2_model_id[h] for h in team_picks]
-    opp_ids = [
-        hero_data_manager.hero_name_2_model_id[h] for h in opponent_picks
-    ]
+    team_ids = [hero_data_manager.local_name_2_model_id[h] for h in team_picks]
+    opp_ids = [hero_data_manager.local_name_2_model_id[h] for h in opponent_picks]
 
     team_ids += [0] * (MAX_PICK - len(team_ids))
     opp_ids += [0] * (4 - len(opp_ids))
 
-    return (
-        team_ids[:2]
-        + opp_ids[:2]
-        + team_ids[2:4]
-        + opp_ids[2:4]
-        + team_ids[4:]
-    )
+    return team_ids[:2] + opp_ids[:2] + team_ids[2:4] + opp_ids[2:4] + team_ids[4:]
 
 
 def evaluate_candidate(
@@ -329,17 +317,16 @@ current_seq = build_draft_sequence(
 
 
 def calculate_baseline_probability(
-    model,
-    team_picks,
-    opponent_picks,
-):
+    model: RNNWinPredictor,
+    team_picks: list[str],
+    opponent_picks: list[str],
+) -> float:
     baseline_ids = build_draft_sequence(
         team_picks,
         opponent_picks,
     )
     hero_features = [
-        hero_data_manager.get_hero_features(draft_id)
-        for draft_id in baseline_ids
+        hero_data_manager.get_hero_features(draft_id) for draft_id in baseline_ids
     ]
 
     baseline_tensor = torch.tensor(
@@ -363,9 +350,7 @@ def calculate_baseline_probability(
 
 if st.button("Get Suggestions"):
     try:
-        allowed = (
-            selected_positions if selected_positions else position_options
-        )
+        allowed = selected_positions if selected_positions else position_options
         suggestions = suggest_best_picks(
             loaded_model,
             team_picks_multiselect,

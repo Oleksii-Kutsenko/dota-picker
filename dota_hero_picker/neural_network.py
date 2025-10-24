@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn
@@ -79,7 +80,7 @@ class RNNWinPredictor(nn.Module):
         self,
         draft_sequence: torch.Tensor,
         hero_features: torch.Tensor,
-    ):
+    ) -> Any:
         batch_size, _ = draft_sequence.shape
 
         hero_embeds = self.hero_emb(draft_sequence)

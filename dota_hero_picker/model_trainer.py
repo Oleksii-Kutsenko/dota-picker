@@ -105,7 +105,7 @@ class ModelTrainer:
             prepare_dataframe(validation_dataframe),
         )
         prepared_test_dataframe = enrich_dataframe(
-            prepare_dataframe(test_dataframe)
+            prepare_dataframe(test_dataframe),
         )
 
         compute_baseline_f1(
@@ -218,5 +218,5 @@ class ModelTrainer:
                 num_gru_layers=1,
                 dropout_rate=0.4,
                 bidirectional=True,
-            )
+            ),
         )

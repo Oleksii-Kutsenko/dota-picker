@@ -1,10 +1,10 @@
 import csv
+import datetime
 import logging
 import os
 import sys
 import time
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,7 @@ HEROES_FILE = "heroes.json"
 API_MATCHES_ENDPOINT = "https://api.opendota.com/api/players/{}/matches"
 API_MATCH_DETAILS_ENDPOINT = "https://api.opendota.com/api/matches/{}"
 API_HEROES_ENDPOINT = "https://api.opendota.com/api/heroes"
-CURRENT_PATCH_START = datetime(2025, 8, 15)
+CURRENT_PATCH_START = datetime.datetime(2025, 8, 15)
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -28,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def read_existing_matches(csv_path):
+def read_existing_matches(csv_path: str) -> tuple[list[int], int]:
     if not os.path.exists(csv_path):
         return set(), None
     match_ids = set()
@@ -45,7 +45,7 @@ def read_existing_matches(csv_path):
 
 
 def prepare_picks(
-    picks_bans: dict[str, Any],
+    picks_bans: list[dict[str, Any]],
     actually_picked_heroes: dict[int, list[int]],
     your_team: int,
 ):
@@ -86,7 +86,7 @@ def prepare_picks(
     return team_picks, opp_picks
 
 
-def parse_draft(match, account_id):
+def parse_draft(match: dict[str, list], account_id: int) -> dict[str, Any]:
     players = match.get("players")
     picks_bans = match.get("picks_bans")
 
@@ -117,7 +117,8 @@ def parse_draft(match, account_id):
     )
 
     if len(team_picks) + len(opp_picks) != 10:
-        raise RuntimeError("Picks parsing failed")
+        msg = "Picks parsing failed"
+        raise RuntimeError(msg)
 
     return {
         "team_picks": team_picks,
@@ -129,13 +130,18 @@ def parse_draft(match, account_id):
     }
 
 
-def fetch_match_details(match_ids, account_id, delay_seconds=1.2):
+def fetch_match_details(
+    match_ids: list[int],
+    account_id: int,
+    delay_seconds: float = 1.2,
+) -> list[dict[str, Any]]:
     detailed_decisions = []
     for match_id in match_ids:
         response = requests.get(
-            API_MATCH_DETAILS_ENDPOINT.format(match_id), timeout=5
+            API_MATCH_DETAILS_ENDPOINT.format(match_id),
+            timeout=5,
         )
-        if response.status_code == 200:
+        if response.status_code == HTTP_OK:
             match = response.json()
             data = parse_draft(match, account_id)
             if data:
@@ -144,7 +150,8 @@ def fetch_match_details(match_ids, account_id, delay_seconds=1.2):
                 logger.info(f"Match #{match['match_id']} failed to parse.")
         else:
             logger.info(
-                f"Failed to fetch details for match {match_id}: {response.status_code}"
+                f"Failed to fetch details for match "
+                f"{match_id}: {response.status_code}",
             )
         logger.info(f"Match #{match_id} has been processed")
 
@@ -152,8 +159,8 @@ def fetch_match_details(match_ids, account_id, delay_seconds=1.2):
     return detailed_decisions
 
 
-def save_to_csv(csv_path, new_decisions):
-    if os.path.exists(csv_path):
+def save_to_csv(csv_path: str, new_decisions: list[dict[str, Any]]) -> None:
+    if Path(csv_path).exists():
         df_existing = pd.read_csv(csv_path)
     else:
         df_existing = pd.DataFrame(
@@ -164,7 +171,7 @@ def save_to_csv(csv_path, new_decisions):
                 "win",
                 "match_id",
                 "start_time",
-            ]
+            ],
         )
 
     data_rows = [
@@ -180,34 +187,47 @@ def save_to_csv(csv_path, new_decisions):
     ]
     df_new = pd.DataFrame(data_rows)
 
-    # Append new data and drop duplicates (adjust subset if you want uniqueness on specific columns)
+    # Append new data and drop duplicates
+    # (adjust subset if you want uniqueness on specific columns)
     df_all = pd.concat([df_existing, df_new], ignore_index=True)
-    df_all.drop_duplicates(inplace=True)
+    dropped_df_all = df_all.drop_duplicates()
 
     # Sort by start_time ascending
-    df_all.sort_values(by="start_time", inplace=True)
+    sorted_df_all = dropped_df_all.sort_values(by="start_time")
 
-    df_all.to_csv(csv_path, index=False)
+    sorted_df_all.to_csv(csv_path, index=False)
 
 
-def fetch_and_save_new_decisions(personal_dota_matches_path, account_id):
+HTTP_OK = 200
+
+
+def fetch_and_save_new_decisions(
+    personal_dota_matches_path: str,
+    account_id: int,
+) -> int:
     existing_match_ids, _ = read_existing_matches(personal_dota_matches_path)
 
     params = {}
-    params["date"] = (datetime.today() - CURRENT_PATCH_START).days + 1
+    params["date"] = (
+        datetime.datetime.now(tz=datetime.UTC) - CURRENT_PATCH_START
+    ).days + 1
 
     response = requests.get(
-        API_MATCHES_ENDPOINT.format(account_id), params=params, timeout=5
+        API_MATCHES_ENDPOINT.format(account_id),
+        params=params,
+        timeout=5,
     )
-    if response.status_code != 200:
-        raise DotaPickerError(f"API error: {response.status_code}")
+    if response.status_code != HTTP_OK:
+        msg = f"API error: {response.status_code}"
+        raise DotaPickerError(msg)
     data = response.json()
 
     new_match_ids = [
         m["match_id"]
         for m in data
         if m["match_id"] not in existing_match_ids
-        and datetime.fromtimestamp(m["start_time"]) >= CURRENT_PATCH_START
+        and datetime.datetime.fromtimestamp(m["start_time"], tz=datetime.UTC)
+        >= CURRENT_PATCH_START
     ]
 
     if not new_match_ids:
@@ -221,7 +241,7 @@ def fetch_and_save_new_decisions(personal_dota_matches_path, account_id):
     return len(detailed)
 
 
-def main(personal_dota_matches_path, account_id):
+def main(personal_dota_matches_path: str, account_id: int) -> None:
     num_saved = fetch_and_save_new_decisions(
         personal_dota_matches_path,
         account_id,

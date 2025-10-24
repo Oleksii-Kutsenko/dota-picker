@@ -28,7 +28,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MID_POINT = 0.5
 
 
-def count_trainable_params(model: RNNWinPredictor):
+def count_trainable_params(model: RNNWinPredictor) -> int:
     """Count the number of trainable parameters in a PyTorch model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
