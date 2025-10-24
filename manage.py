@@ -41,7 +41,7 @@ def load_public_matches() -> None:
 @cli.command()
 def train_model() -> None:
     try:
-        module = importlib.import_module("dota_hero_picker.train_model")
+        module = importlib.import_module("dota_hero_picker.model_trainer")
         module.ModelTrainer(
             settings.PERSONAL_DOTA_MATCHES_PATH,
         ).main()

@@ -1,14 +1,18 @@
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 from torch import nn
+
+from .hero_data_manager import HeroDataManager
 
 SEQ_LEN = 9
 
 
 @dataclass
 class NNParameters:
+    """
+    Parameters for the neural network
+    """
     num_heroes: int
     embedding_dim: int
     gru_hidden_dim: int
@@ -18,23 +22,27 @@ class NNParameters:
 
 
 class RNNWinPredictor(nn.Module):
+    """
+    Dota 2 match win predictor
+    """
+
     def __init__(
         self,
         nn_parameters: NNParameters,
     ) -> None:
         super().__init__()
-        self.gru_hidden_dim = nn_parameters.gru_hidden_dim
-        self.num_gru_layers = nn_parameters.num_gru_layers
-        self.seq_len = SEQ_LEN
-        self.bidirectional = nn_parameters.bidirectional
-
         self.hero_emb = nn.Embedding(
             nn_parameters.num_heroes + 1,
             nn_parameters.embedding_dim,
             padding_idx=0,
         )
+        self.gru_hidden_dim = nn_parameters.gru_hidden_dim
+        self.num_gru_layers = nn_parameters.num_gru_layers
+        self.bidirectional = nn_parameters.bidirectional
 
-        self.feature_dim = nn_parameters.embedding_dim
+        self.feature_dim = (
+            nn_parameters.embedding_dim + HeroDataManager.HERO_FEATURES_NUM
+        )
         self.gru = nn.GRU(
             self.feature_dim,
             nn_parameters.gru_hidden_dim,
@@ -48,10 +56,11 @@ class RNNWinPredictor(nn.Module):
 
         self.dropout = nn.Dropout(nn_parameters.dropout_rate)
 
-        output_dim = nn_parameters.gru_hidden_dim * (
+        gru_output_dim = nn_parameters.gru_hidden_dim * (
             2 if self.bidirectional else 1
         )
-        self.output = nn.Linear(output_dim, 1)
+
+        self.output = nn.Linear(gru_output_dim, 1)
 
         self._initialize_weights()
 
@@ -72,13 +81,15 @@ class RNNWinPredictor(nn.Module):
     def forward(
         self,
         draft_sequence: torch.Tensor,
+        hero_features: torch.Tensor,
     ):
-        batch_size = draft_sequence.size(0)
+        batch_size, _ = draft_sequence.shape
 
-        embeds = self.hero_emb(draft_sequence)
-        embeds = self.dropout(embeds)
+        hero_embeds = self.hero_emb(draft_sequence)
+        combined_input = torch.cat([hero_embeds, hero_features], dim=-1)
+        combined_input = self.dropout(combined_input)
 
-        _, hidden = self.gru(embeds)
+        _, hidden = self.gru(combined_input)
         if self.bidirectional:
             hidden = hidden.view(
                 self.num_gru_layers, 2, batch_size, self.gru_hidden_dim

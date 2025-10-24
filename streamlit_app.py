@@ -6,16 +6,14 @@ import torch
 import settings
 from dota_hero_picker.data_preparation import (
     MAX_PICK,
-    hero_name_2_model_id,
-    model_id_2_hero_data,
 )
-from dota_hero_picker.load_personal_matches import get_hero_data
+from dota_hero_picker.hero_data_manager import HeroDataManager
+from dota_hero_picker.model_trainer import ModelTrainer
 from dota_hero_picker.neural_network import RNNWinPredictor
-from dota_hero_picker.train_model import ModelTrainer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-hero_data = get_hero_data()
+hero_data = HeroDataManager().raw_hero_data
 hero_positions = {
     "Troll Warlord": [1, 2],
     "Ogre Magi": [4, 5],
@@ -147,6 +145,7 @@ hero_positions = {
 
 heroes = [hero_data_item["localized_name"] for hero_data_item in hero_data]
 num_heroes = len(heroes)
+hero_data_manager = HeroDataManager()
 
 
 def build_draft_sequence(
@@ -154,13 +153,21 @@ def build_draft_sequence(
     opponent_picks: list[str],
     candidate: str | None = None,
 ) -> list[int]:
-    team_picks = [h for h in team_picks if h in hero_name_2_model_id]
+    team_picks = [
+        h for h in team_picks if h in hero_data_manager.hero_name_2_model_id
+    ]
     if candidate:
         team_picks.append(candidate)
-    opponent_picks = [h for h in opponent_picks if h in hero_name_2_model_id]
+    opponent_picks = [
+        h
+        for h in opponent_picks
+        if h in hero_data_manager.hero_name_2_model_id
+    ]
 
-    team_ids = [hero_name_2_model_id[h] for h in team_picks]
-    opp_ids = [hero_name_2_model_id[h] for h in opponent_picks]
+    team_ids = [hero_data_manager.hero_name_2_model_id[h] for h in team_picks]
+    opp_ids = [
+        hero_data_manager.hero_name_2_model_id[h] for h in opponent_picks
+    ]
 
     team_ids += [0] * (MAX_PICK - len(team_ids))
     opp_ids += [0] * (4 - len(opp_ids))
@@ -174,12 +181,6 @@ def build_draft_sequence(
     )
 
 
-def pad_hero_ids(hero_names: list[str]) -> list[int]:
-    ids = [hero_name_2_model_id[name] for name in hero_names]
-    padded = ids + [0] * (MAX_PICK - len(ids))
-    return padded[:MAX_PICK]
-
-
 def evaluate_candidate(
     model: RNNWinPredictor,
     candidate_hero: str,
@@ -191,20 +192,20 @@ def evaluate_candidate(
         opponent_picks,
         candidate_hero,
     )
-    is_melee_sequence = [
-        model_id_2_hero_data.get(hero_id, {"is_melee": -1})["is_melee"]
-        for hero_id in draft_ids
+    hero_features = [
+        hero_data_manager.get_hero_features(draft_id) for draft_id in draft_ids
     ]
+
     draft_tensor = torch.tensor([draft_ids], dtype=torch.long, device=device)
-    is_melee_tensor = torch.tensor(
-        [is_melee_sequence],
+    hero_features_tensor = torch.tensor(
+        [hero_features],
         dtype=torch.long,
         device=device,
-    ).unsqueeze(-1)
+    )
 
     model.eval()
     with torch.no_grad():
-        logits = model(draft_tensor, is_melee_tensor)
+        logits = model(draft_tensor, hero_features_tensor)
         prob = torch.sigmoid(logits).item()
 
     return (candidate_hero, prob)
@@ -245,7 +246,9 @@ st.title("Dota Picker Web UI")
 model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
 
 if model_path.exists():
-    loaded_model = ModelTrainer.create_model()
+    loaded_model = ModelTrainer.create_model(
+        len(HeroDataManager().raw_hero_data),
+    )
     loaded_model.load_state_dict(torch.load(model_path))
     loaded_model.to(device)
     loaded_model.eval()
@@ -342,23 +345,27 @@ if st.button("Get Suggestions"):
             team_picks_multiselect,
             opponent_picks_multiselect,
         )
-        is_melee_sequence = [
-            model_id_2_hero_data.get(hero_id, {"is_melee": -1})["is_melee"]
-            for hero_id in baseline_ids
+        hero_features = [
+            hero_data_manager.get_hero_features(draft_id)
+            for draft_id in baseline_ids
         ]
+
         baseline_tensor = torch.tensor(
             [baseline_ids],
             dtype=torch.long,
             device=device,
         )
-        is_melee_tensor = torch.tensor(
-            [is_melee_sequence],
+        hero_features_tensor = torch.tensor(
+            [hero_features],
             dtype=torch.long,
             device=device,
-        ).unsqueeze(-1)
+        )
 
         with torch.no_grad():
-            baseline_logits = loaded_model(baseline_tensor, is_melee_tensor)
+            baseline_logits = loaded_model(
+                baseline_tensor,
+                hero_features_tensor,
+            )
             baseline_prob = torch.sigmoid(baseline_logits).item()
         st.metric(
             "Baseline Win Prob (no new pick)",

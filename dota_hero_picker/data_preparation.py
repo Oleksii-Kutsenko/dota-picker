@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 MAX_PICK = 5
 # hero_data = get_hero_data()
 hero_names = []
-hero_name_2_model_id = {}
+# hero_name_2_model_id = {}
 model_id_2_hero_name = {}
 model_id_2_hero_data = {}
 api_id_2_model_id = {}
@@ -45,7 +45,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
             + team_picks[4:]
         )
         for index, pick in enumerate(draft_sequence, 1):
-            is_my_decision = my_pick == pick
+            is_my_decision = int(my_pick == pick)
             padded_draft_sequence = draft_sequence[:index] + [0] * (
                 SEQ_LEN - index
             )
@@ -77,7 +77,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
                 {
                     "draft_sequence": padded_draft_sequence,
                     "win": win,
-                    "is_my_decision": False,
+                    "is_my_decision": 0,
                 }
             )
 
@@ -107,7 +107,7 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
             {
                 "draft_sequence": padded_draft_sequence,
                 "win": row.win,
-                "is_my_decision": True,
+                "is_my_decision": 1,
             }
         )
 
@@ -115,5 +115,18 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
 
 
 def enrich_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
-    breakpoint()
-    return pd.DataFrame()
+    results = []
+    hero_data_manager = HeroDataManager()
+    for _, row in dataframe.iterrows():
+        hero_features = []
+        for hero_id in row.draft_sequence:
+            hero_features.append(hero_data_manager.get_hero_features(hero_id))
+        results.append(
+            {
+                "draft_sequence": row.draft_sequence,
+                "hero_features": hero_features,
+                "win": row.win,
+                "is_my_decision": row.is_my_decision,
+            }
+        )
+    return pd.DataFrame(results)

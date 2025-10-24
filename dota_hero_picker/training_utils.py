@@ -1,10 +1,8 @@
-import json
 import logging
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -18,24 +16,16 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
 
-import settings
-from dota_hero_picker.hero_data_manager import HeroDataManager
-
-from .data_preparation import (
-    api_id_2_model_id,
-    create_augmented_dataframe,
-    enrich_dataframe,
-    prepare_dataframe,
-)
-from .neural_network import NNParameters, RNNWinPredictor
+from .neural_network import RNNWinPredictor
 
 logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+MID_POINT = 0.5
 
 
 def count_trainable_params(model: RNNWinPredictor):
@@ -73,8 +63,9 @@ class DotaDataset(Dataset[TrainingExample]):
 
         return (
             torch.tensor(row["draft_sequence"], dtype=torch.long),
+            torch.tensor(row["hero_features"], dtype=torch.float),
             torch.tensor(row["win"], dtype=torch.float),
-            torch.tensor(row.get("is_my_decision", 0.0), dtype=torch.float),
+            torch.tensor(row["is_my_decision"], dtype=torch.long),
         )
 
 
@@ -125,12 +116,14 @@ class MetricsResult:
 
 
 def process_evaluation_batch(
-    model,
-    batch_data,
-    criterion,
+    model: RNNWinPredictor,
+    batch_data: TrainingExample,
+    criterion: nn.BCEWithLogitsLoss,
 ):
-    draft_sequence, is_win, _ = [t.to(device) for t in batch_data]
-    outputs = model(draft_sequence)
+    draft_sequence, hero_features, is_win, _ = [
+        t.to(device) for t in batch_data
+    ]
+    outputs = model(draft_sequence, hero_features)
     per_sample_loss = criterion(outputs, is_win)
 
     loss = (per_sample_loss).mean()
@@ -143,14 +136,16 @@ def process_training_batch(
     batch_data,
     training_components,
     decision_weight,
-) -> tuple[float, torch.Tensor, torch.Tensor]:
+) -> tuple[np.floating[Any], torch.Tensor, torch.Tensor]:
     """
     Process a single batch: forward pass, loss computation,
     and optimization step.
     """
-    draft_sequence, is_win, is_my_decision = [t.to(device) for t in batch_data]
+    draft_sequence, hero_features, is_win, is_my_decision = [
+        t.to(device) for t in batch_data
+    ]
     training_components.optimizer.zero_grad()
-    outputs = model(draft_sequence)
+    outputs = model(draft_sequence, hero_features)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
     weights = torch.where(
@@ -177,7 +172,6 @@ def evaluate_model(
     all_preds = []
     all_probs = []
     all_labels = []
-    mid_point = 0.5
 
     with torch.no_grad():
         for batch_data in loader:
@@ -190,7 +184,7 @@ def evaluate_model(
             all_losses.append(batch_loss)
 
             probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
-            preds = (probs > mid_point).astype(float)
+            preds = (probs > MID_POINT).astype(float)
 
             all_probs.extend(probs)
             all_preds.extend(preds)
@@ -265,17 +259,16 @@ class TrainingComponents:
 
 def train_step(
     model: RNNWinPredictor,
-    train_loader: DataLoader,
+    train_loader: DataLoader[DotaDataset],
     training_components: TrainingComponents,
     decision_weight: int,
 ) -> tuple[MetricsResult, np.ndarray]:
     model.train()
 
-    all_losses = []
-    all_preds = []
+    all_losses: list[np.floating] = []
+    all_preds: list[np.floating] = []
     all_probs: list[np.floating] = []
-    all_labels = []
-    mid_point = 0.5
+    all_labels: list[np.floating] = []
 
     for batch_data in train_loader:
         batch_loss, outputs, is_win = process_training_batch(
@@ -288,7 +281,7 @@ def train_step(
         all_losses.append(batch_loss)
 
         probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
-        preds = (probs > mid_point).astype(float)
+        preds = (probs > MID_POINT).astype(float)
 
         all_probs.extend(probs)
         all_preds.extend(preds)
@@ -367,7 +360,7 @@ class TrainingArguments:
     scheduler_parameters: SchedulerParameters
     optimizer_parameters: OptimizerParameters
     batch_size: int
-    decision_weight: float
+    decision_weight: int
     epochs: int
     data: TrainingData
     pos_weight: torch.Tensor | None = None
@@ -416,13 +409,12 @@ def train_model(
 ) -> tuple[RNNWinPredictor, MetricsResult]:
     model.to(device)
 
-    if training_arguments.pos_weight:
-        criterion = nn.BCEWithLogitsLoss(
-            reduction="none",
-            pos_weight=training_arguments.pos_weight,
-        )
-    else:
-        criterion = nn.BCEWithLogitsLoss(reduction="none")
+    criterion = nn.BCEWithLogitsLoss(
+        reduction="none",
+        pos_weight=training_arguments.pos_weight
+        if training_arguments.pos_weight
+        else None,
+    )
 
     optimizer = optim.AdamW(
         model.parameters(),
@@ -511,186 +503,3 @@ def compute_pos_weight(decision_dataframe: pd.DataFrame) -> torch.Tensor:
     logger.info(f"Number of Loses {num_of_negatives}")
     logger.info(f"Pos Weight {pos_weight}")
     return pos_weight
-
-
-class ModelTrainer:
-    """Class responsible for model training."""
-
-    def __init__(self, csv_file_path: str) -> None:
-        self.csv_file_path = csv_file_path
-        self.hero_data_manager = HeroDataManager()
-
-    def create_matches_dataframe(self) -> pd.DataFrame:
-        if not Path(self.csv_file_path).exists():
-            msg = f"CSV file not found: {self.csv_file_path}"
-            raise FileNotFoundError(msg)
-
-        matches_dataframe = pd.read_csv(
-            self.csv_file_path,
-            converters={
-                "team_picks": str,
-                "opponent_picks": str,
-            },
-            dtype={
-                "win": int,
-                "picked_hero": int,
-            },
-        )
-        pick_columns = [
-            "team_picks",
-            "opponent_picks",
-        ]
-        for column in pick_columns:
-            matches_dataframe[column] = matches_dataframe[column].apply(
-                json.loads,
-            )
-            matches_dataframe[column] = matches_dataframe[column].apply(
-                lambda hero_list: [
-                    self.hero_data_manager.api_id_2_model_id[api_id]
-                    for api_id in hero_list
-                ],
-            )
-        matches_dataframe["picked_hero"] = matches_dataframe[
-            "picked_hero"
-        ].apply(
-            lambda api_id: self.hero_data_manager.api_id_2_model_id[api_id],
-        )
-
-        return matches_dataframe
-
-    def prepare_datasets(
-        self,
-    ) -> tuple[DotaDataset, DotaDataset, DotaDataset, torch.Tensor]:
-        matches_dataframe = self.create_matches_dataframe()
-        pos_weight = compute_pos_weight(matches_dataframe)
-
-        train_dataframe, tmp_dataframe = train_test_split(
-            matches_dataframe,
-            test_size=0.2,
-            stratify=matches_dataframe["win"],
-        )
-        validation_dataframe, test_dataframe = train_test_split(
-            tmp_dataframe,
-            test_size=0.5,
-            stratify=tmp_dataframe["win"],
-        )
-        augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
-        enrich_dataframe(augmented_train_dataframe)
-        logger.info(
-            f"Size of augmented dataset {len(augmented_train_dataframe)}",
-        )
-        prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
-        prepared_test_dataframe = prepare_dataframe(test_dataframe)
-
-        compute_baseline_f1(
-            augmented_train_dataframe["win"],
-            prepared_test_dataframe["win"],
-        )
-
-        train_dataset = DotaDataset(augmented_train_dataframe)
-        val_dataset = DotaDataset(prepared_validation_dataframe)
-        test_dataset = DotaDataset(prepared_test_dataframe)
-        return train_dataset, val_dataset, test_dataset, pos_weight
-
-    def main(self) -> None:
-        """Model training entrypoint."""
-        train_dataset, val_dataset, test_dataset, pos_weight = (  # pylint: disable=W0612 # noqa: RUF059
-            self.prepare_datasets()
-        )
-
-        training_arguments = self.create_training_arguments(
-            train_dataset,
-            val_dataset,
-        )
-
-        model = self.create_model()
-        logger.info(
-            f"Model trainable parameters: {count_trainable_params(model)}",
-        )
-        trained_model, _ = train_model(
-            model,
-            training_arguments,
-        )
-
-        if training_arguments.pos_weight:
-            criterion = nn.BCEWithLogitsLoss(
-                reduction="none",
-                pos_weight=training_arguments.pos_weight,
-            )
-        else:
-            criterion = nn.BCEWithLogitsLoss(reduction="none")
-
-        metrics, _ = evaluate_model(
-            trained_model,
-            get_data_loader(
-                test_dataset,
-                training_arguments.batch_size,
-                ShuffleEnum.UNSHUFFLED,
-            ),
-            criterion,
-        )
-
-        logger.info("Test Metrics")
-        logger.info(metrics)
-
-        logger.info("--- Confusion Matrix ---")
-        header = f"{'':<12}" + "Pred: Loss    " + "Pred: Win     "
-        logger.info(header)
-        row1 = (
-            f"Actual: Loss  {metrics.confusion_matrix[0, 0]:<12}"  # type: ignore[index]
-            f"{metrics.confusion_matrix[0, 1]:<13}"  # type: ignore[index]
-        )
-        row2 = (
-            f"Actual: Win   {metrics.confusion_matrix[1, 0]:<12}"  # type: ignore[index]
-            f"{metrics.confusion_matrix[1, 1]:<13}"  # type: ignore[index]
-        )
-        logger.info(row1)
-        logger.info(row2)
-        logger.info("------------------------")
-
-        torch.save(
-            trained_model.state_dict(),
-            settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
-        )
-        logger.info(
-            "Training complete! Model saved as 'trained_model.pth'.",
-        )
-
-    def create_training_arguments(
-        self,
-        train_dataset: DotaDataset,
-        val_dataset: DotaDataset,
-    ) -> TrainingArguments:
-        return TrainingArguments(
-            data=TrainingData(
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-            ),
-            pos_weight=None,
-            early_stopping_patience=5,
-            epochs=30,
-            optimizer_parameters=OptimizerParameters(
-                lr=9.3483161282681e-05,
-                weight_decay=0.72995888183633,
-            ),
-            scheduler_parameters=SchedulerParameters(
-                factor=0.45,
-                scheduler_patience=21,
-                threshold=0.03471,
-            ),
-            decision_weight=9,
-            batch_size=128,
-        )
-
-    @staticmethod
-    def create_model() -> RNNWinPredictor:
-        return RNNWinPredictor(
-            NNParameters(
-                num_heroes=num_heroes,
-                embedding_dim=39,
-                gru_hidden_dim=142,
-                num_gru_layers=1,
-                dropout_rate=0.6,
-                bidirectional=True,
-            )
-        )

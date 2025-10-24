@@ -454,6 +454,7 @@ disable = [
   "missing-module-docstring",
   "logging-fstring-interpolation",
   "missing-function-docstring",
+  "docstring-first-line-empty",
 ]
 
 # Enable the message, report, category or checker with the given id(s). You can
