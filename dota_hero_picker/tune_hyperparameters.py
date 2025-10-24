@@ -67,7 +67,7 @@ def perform_cross_validation(
     training_arguments: TrainingArguments,
     nn_parameters: NNParameters,
 ) -> tuple[np.floating[Any], np.floating[Any], np.floating[Any], int]:
-    skf = StratifiedKFold(n_splits=3, shuffle=True)
+    skf = StratifiedKFold(n_splits=4, shuffle=True)
     folds_val_f1 = []
     folds_val_loss = []
     folds_val_auc = []
@@ -118,7 +118,7 @@ def create_objective(
         )
         gru_hidden_dim = trial.suggest_categorical(
             "gru_hidden_dim",
-            [64, 128, 256],
+            [32, 64, 128, 256, 512],
         )
         num_gru_layers = trial.suggest_int("num_gru_layers", 1, 3)
         bidirectional = trial.suggest_categorical(
@@ -139,10 +139,14 @@ def create_objective(
             ),
             pos_weight=pos_weight if use_pos_weight else None,
             early_stopping_patience=(
-                trial.suggest_int("early_stopping_patience", 2, 9, step=2)
+                trial.suggest_int(
+                    "early_stopping_patience",
+                    1,
+                    9,
+                )
             ),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 5e-5, 5e-3, log=True),
+                lr=trial.suggest_float("lr", 5e-5, 5e-2, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
                     1e-5,
@@ -152,7 +156,7 @@ def create_objective(
             ),
             epochs=trial.suggest_int("epochs", 15, 45),
             scheduler_parameters=SchedulerParameters(
-                factor=trial.suggest_float("factor", 0.3, 0.55, step=0.05),
+                factor=trial.suggest_float("factor", 0.3, 0.65, step=0.001),
                 threshold=trial.suggest_float(
                     "threshold",
                     0.001,
@@ -169,7 +173,7 @@ def create_objective(
                 "batch_size",
                 [32, 64, 128, 256],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 6, 11),
+            decision_weight=trial.suggest_int("decision_weight", 5, 11),
         )
 
         mean_f1, mean_val_loss, mean_val_auc, trainable_params = (
@@ -216,7 +220,7 @@ def main(csv_file_path: str) -> None:
 
     study.optimize(
         objective,
-        n_trials=400,
+        n_trials=500,
         show_progress_bar=True,
     )
 

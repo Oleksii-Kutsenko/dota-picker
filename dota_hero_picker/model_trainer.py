@@ -199,19 +199,19 @@ class ModelTrainer:
                 val_dataset=val_dataset,
             ),
             pos_weight=None,
-            early_stopping_patience=3,
-            epochs=38,
+            early_stopping_patience=2,
+            epochs=39,
             optimizer_parameters=OptimizerParameters(
-                lr=0.000251161196975555,
-                weight_decay=0.000804831255477926,
+                lr=0.00321158166331838,
+                weight_decay=0.000132588918788133,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.4,
-                scheduler_patience=22,
-                threshold=0.0189354152824383,
+                factor=0.55,
+                scheduler_patience=23,
+                threshold=0.00424181379120684,
             ),
-            decision_weight=7,
-            batch_size=64,
+            decision_weight=6,
+            batch_size=256,
         )
 
     @staticmethod
@@ -220,9 +220,9 @@ class ModelTrainer:
             NNParameters(
                 num_heroes=num_heroes,
                 embedding_dim=16,
-                gru_hidden_dim=128,
-                num_gru_layers=2,
-                dropout_rate=0.45,
+                gru_hidden_dim=64,
+                num_gru_layers=1,
+                dropout_rate=0.4,
                 bidirectional=True,
             )
         )
