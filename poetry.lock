@@ -244,24 +244,6 @@ files = [
 colorama = {version = "*", markers = "platform_system == \"Windows\""}
 
 [[package]]
-name = "cmaes"
-version = "0.12.0"
-description = "Lightweight Covariance Matrix Adaptation Evolution Strategy (CMA-ES) implementation for Python 3."
-optional = false
-python-versions = ">=3.8"
-groups = ["main"]
-files = [
-    {file = "cmaes-0.12.0-py3-none-any.whl", hash = "sha256:d0e3e50ce28a36294bffa16a5626c15d23155824cf6b0a373db30dbbea9b2256"},
-    {file = "cmaes-0.12.0.tar.gz", hash = "sha256:6aab41eee2f38bf917560a7e7d1ba0060632cd44cdf7ac2a10704da994624182"},
-]
-
-[package.dependencies]
-numpy = "*"
-
-[package.extras]
-cmawm = ["scipy"]
-
-[[package]]
 name = "colorama"
 version = "0.4.6"
 description = "Cross-platform colored terminal text."
@@ -2571,4 +2553,4 @@ watchmedo = ["PyYAML (>=3.10)"]
 [metadata]
 lock-version = "2.1"
 python-versions = "<3.14,>=3.12"
-content-hash = "215cd3cc6892b7eb8a8f5c4a972706ab0c1484571ba2346c52ffa1533cb6861f"
+content-hash = "2575738d26ea131a01edda1e34eb678e77c067c1c2d8ea3a43971fa7e46a3e1f"

@@ -9,20 +9,6 @@ from .neural_network import SEQ_LEN
 logger = logging.getLogger(__name__)
 
 MAX_PICK = 5
-# hero_data = get_hero_data()
-# hero_name_2_model_id = {}
-# num_heroes = len(hero_data)
-# for model_id, hero in enumerate(hero_data, 1):
-#     hero_name = hero["localized_name"]
-#     api_hero_id = hero["id"]
-#     hero_names.append(hero_name)
-#     hero_name_2_model_id[hero_name] = model_id
-#     model_id_2_hero_name[model_id] = hero_name
-#     model_id_2_hero_data[model_id] = hero
-#     model_id_2_hero_data[model_id]["is_melee"] = (
-#         1 if model_id_2_hero_data[model_id]["attack_type"] == "Melee" else 0
-#     )
-#     api_id_2_model_id[api_hero_id] = model_id
 
 
 def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
