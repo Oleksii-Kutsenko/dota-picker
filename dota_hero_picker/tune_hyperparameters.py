@@ -4,31 +4,31 @@ from typing import Any
 
 import numpy as np
 import optuna
-import optunahub
 import pandas as pd
 from optuna import Trial
 from sklearn.model_selection import StratifiedKFold
 
-from dota_hero_picker.train_model import (
+from dota_hero_picker.hero_data_manager import HeroDataManager
+from dota_hero_picker.training_utils import (
     DotaDataset,
     MetricsResult,
-    ModelTrainer,
     OptimizerParameters,
     SchedulerParameters,
     TrainingArguments,
     TrainingData,
     compute_pos_weight,
     count_trainable_params,
-    load_personal_matches,
     train_model,
 )
 
 from .data_preparation import (
     create_augmented_dataframe,
-    num_heroes,
+    enrich_dataframe,
     prepare_dataframe,
 )
+from .model_trainer import ModelTrainer
 from .neural_network import (
+    NNParameters,
     RNNWinPredictor,
 )
 
@@ -45,8 +45,8 @@ def perform_fold(
     train_df = matches_dataframe.iloc[train_idx]
     val_df = matches_dataframe.iloc[val_idx]
 
-    augmented_train = create_augmented_dataframe(train_df)
-    prepared_val = prepare_dataframe(val_df)
+    augmented_train = enrich_dataframe(create_augmented_dataframe(train_df))
+    prepared_val = enrich_dataframe(prepare_dataframe(val_df))
     train_dataset = DotaDataset(augmented_train)
     val_dataset = DotaDataset(prepared_val)
 
@@ -65,12 +65,9 @@ def perform_fold(
 def perform_cross_validation(
     matches_dataframe: pd.DataFrame,
     training_arguments: TrainingArguments,
-    embedding_dim: int,
-    gru_hidden_dim: int,
-    num_gru_layers: int,
-    dropout_rate: float,
+    nn_parameters: NNParameters,
 ) -> tuple[np.floating[Any], np.floating[Any], np.floating[Any], int]:
-    skf = StratifiedKFold(n_splits=3, shuffle=True)
+    skf = StratifiedKFold(n_splits=4, shuffle=True)
     folds_val_f1 = []
     folds_val_loss = []
     folds_val_auc = []
@@ -79,16 +76,14 @@ def perform_cross_validation(
         matches_dataframe,
         matches_dataframe["win"],
     ):
-        model = RNNWinPredictor(
-            num_heroes,
-            embedding_dim,
-            gru_hidden_dim,
-            num_gru_layers,
-            dropout_rate,
-        )
+        model = RNNWinPredictor(nn_parameters)
 
         metrics = perform_fold(
-            matches_dataframe, train_idx, val_idx, model, training_arguments
+            matches_dataframe,
+            train_idx,
+            val_idx,
+            model,
+            training_arguments,
         )
 
         folds_val_f1.append(metrics.f1)
@@ -105,19 +100,38 @@ def perform_cross_validation(
 def create_objective(
     model_trainer: ModelTrainer,
 ) -> Callable[[Trial], tuple[float, float, float]]:
-    matches_dataframe = load_personal_matches(model_trainer.csv_file_path)
+    num_heroes = len(HeroDataManager().raw_hero_data)
+    matches_dataframe = ModelTrainer(
+        model_trainer.csv_file_path,
+    ).create_matches_dataframe()
+
     pos_weight = compute_pos_weight(matches_dataframe)
 
     def objective(trial: Trial) -> tuple[float, float, float]:
         use_pos_weight = trial.suggest_categorical(
             "use_pos_weight",
+            [False, True],
+        )
+
+        embedding_dim = trial.suggest_categorical(
+            "embedding_dim",
+            [8, 16, 32, 64],
+        )
+        gru_hidden_dim = trial.suggest_categorical(
+            "gru_hidden_dim",
+            [32, 64, 128, 256, 512],
+        )
+        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 3)
+        bidirectional = trial.suggest_categorical(
+            "bidirectional",
             [True, False],
         )
 
-        embedding_dim = trial.suggest_int("embedding_dim", 4, 64)
-        gru_hidden_dim = trial.suggest_int("gru_hidden_dim", 4, 256)
-        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 4)
-        dropout_rate = trial.suggest_float("dropout_rate", 0.0, 0.8, step=0.05)
+        dropout_rate = (
+            trial.suggest_float("dropout_rate", 0.3, 0.7, step=0.05)
+            if num_gru_layers > 1
+            else trial.suggest_float("dropout_rate", 0.2, 0.5, step=0.05)
+        )
 
         training_arguments = TrainingArguments(
             data=TrainingData(
@@ -128,44 +142,53 @@ def create_objective(
             early_stopping_patience=(
                 trial.suggest_int(
                     "early_stopping_patience",
-                    4,
-                    19,
+                    1,
+                    9,
                 )
             ),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-6, 1e-2, log=True),
+                lr=trial.suggest_float("lr", 5e-5, 5e-2, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
-                    1e-6,
-                    1,
+                    1e-5,
+                    0.1,
                     log=True,
                 ),
             ),
-            epochs=trial.suggest_int("epochs", 2, 50),
+            epochs=trial.suggest_int("epochs", 15, 45),
             scheduler_parameters=SchedulerParameters(
-                factor=trial.suggest_float("factor", 0.1, 0.6, step=0.05),
+                factor=trial.suggest_float("factor", 0.3, 0.65, step=0.001),
                 threshold=trial.suggest_float(
-                    "threshold", 1e-5, 1e-1, step=1e-4
+                    "threshold",
+                    0.001,
+                    0.1,
+                    log=True,
                 ),
                 scheduler_patience=trial.suggest_int(
-                    "scheduler_patience", 5, 25
+                    "scheduler_patience",
+                    15,
+                    30,
                 ),
             ),
             batch_size=trial.suggest_categorical(
                 "batch_size",
-                [4, 8, 16, 32, 64, 128],
+                [32, 64, 128, 256],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 1, 11),
+            decision_weight=trial.suggest_int("decision_weight", 5, 11),
         )
 
         mean_f1, mean_val_loss, mean_val_auc, trainable_params = (
             perform_cross_validation(
                 matches_dataframe,
                 training_arguments,
-                embedding_dim,
-                gru_hidden_dim,
-                num_gru_layers,
-                dropout_rate,
+                NNParameters(
+                    num_heroes=num_heroes,
+                    embedding_dim=embedding_dim,
+                    gru_hidden_dim=gru_hidden_dim,
+                    num_gru_layers=num_gru_layers,
+                    dropout_rate=dropout_rate,
+                    bidirectional=bidirectional,
+                ),
             )
         )
 
@@ -188,24 +211,26 @@ def main(csv_file_path: str) -> None:
     model_trainer = ModelTrainer(csv_file_path)
     objective = create_objective(model_trainer)
 
-    module = optunahub.load_module(package="samplers/auto_sampler")
     study = optuna.create_study(
         study_name="dota_win_predictor",
         directions=["maximize", "minimize", "maximize"],
-        sampler=module.AutoSampler(),
+        sampler=optuna.samplers.NSGAIIISampler(),
         storage="sqlite:///optuna_study.db",
         load_if_exists=True,
     )
 
     study.optimize(
         objective,
-        n_trials=200,
+        n_trials=500,
         show_progress_bar=True,
     )
 
+    def select_f1(trial: optuna.trial.FrozenTrial) -> float:
+        return float(trial.values[0])  # noqa: PD011
+
     fig1 = optuna.visualization.plot_optimization_history(
         study,
-        target=lambda trial: trial.values[0],
+        target=select_f1,
         target_name="F1",
     )
     fig1.write_html("optimization_history.html")

@@ -1,5 +1,4 @@
 import csv
-import json
 import logging
 import os
 import sys
@@ -7,6 +6,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import requests
@@ -28,27 +28,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_hero_data(local_file: str = HEROES_FILE) -> list[dict[str, str]]:
-    if os.path.exists(local_file):
-        with open(local_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    else:
-        response = requests.get(API_HEROES_ENDPOINT, timeout=5)
-        if response.status_code != 200:
-            raise DotaPickerError(
-                f"Failed to fetch heroes: {response.status_code}"
-            )
-        data = response.json()
-        with open(local_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return data
-
-
-def load_hero_map():
-    heroes = get_hero_data()
-    return {hero["id"]: hero["localized_name"] for hero in heroes}
-
-
 def read_existing_matches(csv_path):
     if not os.path.exists(csv_path):
         return set(), None
@@ -65,32 +44,12 @@ def read_existing_matches(csv_path):
     return match_ids, max_start_time
 
 
-def parse_draft(match, account_id):
-    players = match.get("players")
-    picks_bans = match.get("picks_bans")
-
-    your_player = None
-    for player in players:
-        if player.get("account_id") == account_id:
-            your_player = player
-            break
-    else:
-        return None
-
-    your_team = 0 if your_player["isRadiant"] else 1
+def prepare_picks(
+    picks_bans: dict[str, Any],
+    actually_picked_heroes: dict[int, list[int]],
+    your_team: int,
+):
     opp_team = 1 - your_team
-
-    radiant_win = match["radiant_win"]
-    win = 1 if radiant_win == (your_team == 0) else 0
-
-    your_hero_id = your_player["hero_id"]
-
-    actually_picked_heroes = defaultdict(list)
-    for player in players:
-        actually_picked_heroes[player["team_number"]].append(player["hero_id"])
-
-    if not players and not picks_bans:
-        return None
 
     if not picks_bans:
         team_picks = actually_picked_heroes[your_team]
@@ -124,6 +83,38 @@ def parse_draft(match, account_id):
 
         team_picks = team_missing + team_picks
         opp_picks = opp_missing + opp_picks
+    return team_picks, opp_picks
+
+
+def parse_draft(match, account_id):
+    players = match.get("players")
+    picks_bans = match.get("picks_bans")
+
+    your_player = None
+    for player in players:
+        if player.get("account_id") == account_id:
+            your_player = player
+            break
+    else:
+        return None
+
+    your_team = 0 if your_player["isRadiant"] else 1
+
+    radiant_win = match["radiant_win"]
+    win = 1 if radiant_win == (your_team == 0) else 0
+
+    your_hero_id = your_player["hero_id"]
+
+    actually_picked_heroes = defaultdict(list)
+    for player in players:
+        actually_picked_heroes[player["team_number"]].append(player["hero_id"])
+
+    if not players and not picks_bans:
+        return None
+
+    team_picks, opp_picks = prepare_picks(
+        picks_bans, actually_picked_heroes, your_team
+    )
 
     if len(team_picks) + len(opp_picks) != 10:
         raise RuntimeError("Picks parsing failed")

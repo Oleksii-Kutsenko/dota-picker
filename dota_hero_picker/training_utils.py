@@ -1,11 +1,8 @@
-import ast
-import json
 import logging
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,23 +16,16 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
 
-import settings
-
-from .data_preparation import (
-    api_id_2_model_id,
-    create_augmented_dataframe,
-    num_heroes,
-    prepare_dataframe,
-)
 from .neural_network import RNNWinPredictor
 
 logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+MID_POINT = 0.5
 
 
 def count_trainable_params(model: RNNWinPredictor):
@@ -43,44 +33,7 @@ def count_trainable_params(model: RNNWinPredictor):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def load_personal_matches(csv_file_path: str) -> pd.DataFrame:
-    if not Path(csv_file_path).exists():
-        msg = f"CSV file not found: {csv_file_path}"
-        raise FileNotFoundError(msg)
-
-    matches_dataframe = pd.read_csv(
-        csv_file_path,
-        converters={
-            "team_picks": str,
-            "opponent_picks": str,
-        },
-        dtype={
-            "win": int,
-            "picked_hero": int,
-        },
-    )
-    to_split_columns = [
-        "team_picks",
-        "opponent_picks",
-    ]
-    for column in to_split_columns:
-        matches_dataframe[column] = matches_dataframe[column].apply(
-            json.loads,
-        )
-        matches_dataframe[column] = matches_dataframe[column].apply(
-            lambda hero_list: [
-                api_id_2_model_id[api_id] for api_id in hero_list
-            ],
-        )
-    matches_dataframe["picked_hero"] = matches_dataframe["picked_hero"].apply(
-        lambda api_id: api_id_2_model_id[api_id],
-    )
-
-    return matches_dataframe
-
-
 TrainingExample = tuple[
-    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -109,11 +62,9 @@ class DotaDataset(Dataset[TrainingExample]):
 
         return (
             torch.tensor(row["draft_sequence"], dtype=torch.long),
-            torch.tensor(
-                row["is_melee_sequence"], dtype=torch.float
-            ).unsqueeze(-1),
+            torch.tensor(row["hero_features"], dtype=torch.float),
             torch.tensor(row["win"], dtype=torch.float),
-            torch.tensor(row.get("is_my_decision", 0.0), dtype=torch.float),
+            torch.tensor(row["is_my_decision"], dtype=torch.long),
         )
 
 
@@ -128,7 +79,7 @@ def get_data_loader(
     dataset: Dataset[TrainingExample],
     batch_size: int,
     shuffle: ShuffleEnum = ShuffleEnum.SHUFFLED,
-) -> DataLoader[DotaDataset]:
+) -> DataLoader[TrainingExample]:
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle.value)
 
 
@@ -136,7 +87,7 @@ def get_data_loader(
 class MetricsResult:
     """Training metrics."""
 
-    loss: float
+    loss: np.floating[Any]
     accuracy: float
     precision: float
     recall: float
@@ -144,7 +95,7 @@ class MetricsResult:
     auc: float
     confusion_matrix: np.ndarray | None = None
 
-    def to_dict(self) -> dict[str, float]:
+    def to_dict(self) -> dict[str, float | np.floating[Any]]:
         return {
             "loss": self.loss,
             "accuracy": self.accuracy,
@@ -164,37 +115,92 @@ class MetricsResult:
 
 
 def process_evaluation_batch(
-    model,
-    batch_data,
-    criterion,
-):
-    draft_sequence, is_melee_sequence, is_win, is_my_decision = [
+    model: RNNWinPredictor,
+    batch_data: TrainingExample,
+    criterion: nn.BCEWithLogitsLoss,
+) -> tuple[np.floating[Any], torch.Tensor, torch.Tensor]:
+    draft_sequence, hero_features, is_win, _ = [
         t.to(device) for t in batch_data
     ]
-    outputs = model(draft_sequence, is_melee_sequence)
+    outputs = model(draft_sequence, hero_features)
     per_sample_loss = criterion(outputs, is_win)
 
-    mask = is_my_decision == 1.0
     loss = (per_sample_loss).mean()
 
     return loss.item(), outputs, is_win
 
 
+class EarlyStopping:
+    """Simple early stopping."""
+
+    def __init__(self, patience: int = 5, delta: float = 0) -> None:
+        self.patience = patience
+        self.delta = delta
+        self.best_val_loss: np.floating[Any] | None = None
+        self.best_metrics: MetricsResult | None = None
+        self.early_stop = False
+        self.counter = 0
+        self.best_model_state: dict[str, Any] | None = None
+
+    def __call__(
+        self,
+        val_loss: np.floating[Any],
+        metrics: MetricsResult,
+        model: RNNWinPredictor,
+    ) -> None:
+        score = -val_loss
+
+        if self.best_val_loss is None:
+            self.best_val_loss = score
+            self.best_metrics = metrics
+            self.best_model_state = model.state_dict()
+        elif score < self.best_val_loss + self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_val_loss = score
+            self.best_metrics = metrics
+            self.best_model_state = model.state_dict()
+            self.counter = 0
+
+    def load_best_model(self, model: RNNWinPredictor) -> None:
+        if self.best_model_state is None:
+            msg = "Unexpected state"
+            raise RuntimeError(msg)
+        model.load_state_dict(self.best_model_state)
+
+
+@dataclass
+class TrainingComponents:
+    """Components for training."""
+
+    criterion: nn.BCEWithLogitsLoss
+    optimizer: optim.Adam
+    scheduler: optim.lr_scheduler.ReduceLROnPlateau
+    early_stopping: EarlyStopping
+    callbacks: list[Callable[[None], None]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.callbacks is None:
+            self.callbacks = []
+
+
 def process_training_batch(
     model: RNNWinPredictor,
-    batch_data,
-    training_components,
-    decision_weight,
-) -> tuple[float, torch.Tensor, torch.Tensor]:
+    batch_data: TrainingExample,
+    training_components: TrainingComponents,
+    decision_weight: int,
+) -> tuple[np.floating[Any], torch.Tensor, torch.Tensor]:
     """
     Process a single batch: forward pass, loss computation,
     and optimization step.
     """
-    draft_sequence, is_melee_sequence, is_win, is_my_decision = [
+    draft_sequence, hero_features, is_win, is_my_decision = [
         t.to(device) for t in batch_data
     ]
     training_components.optimizer.zero_grad()
-    outputs = model(draft_sequence, is_melee_sequence)
+    outputs = model(draft_sequence, hero_features)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
     weights = torch.where(
@@ -212,16 +218,15 @@ def process_training_batch(
 
 def evaluate_model(
     model: RNNWinPredictor,
-    loader: DataLoader[DotaDataset],
+    loader: DataLoader[TrainingExample],
     criterion: nn.BCEWithLogitsLoss,
 ) -> tuple[MetricsResult, np.ndarray]:
     model.eval()
 
-    all_losses = []
-    all_preds = []
-    all_probs = []
-    all_labels = []
-    mid_point = 0.5
+    all_losses: list[np.floating] = []
+    all_preds: list[np.floating] = []
+    all_probs: list[np.floating] = []
+    all_labels: list[np.floating] = []
 
     with torch.no_grad():
         for batch_data in loader:
@@ -234,7 +239,7 @@ def evaluate_model(
             all_losses.append(batch_loss)
 
             probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
-            preds = (probs > mid_point).astype(float)
+            preds = (probs > MID_POINT).astype(float)
 
             all_probs.extend(probs)
             all_preds.extend(preds)
@@ -253,17 +258,16 @@ def evaluate_model(
 
 def train_step(
     model: RNNWinPredictor,
-    train_loader,
-    training_components,
-    decision_weight,
+    train_loader: DataLoader[TrainingExample],
+    training_components: TrainingComponents,
+    decision_weight: int,
 ) -> tuple[MetricsResult, np.ndarray]:
     model.train()
 
-    all_losses = []
-    all_preds = []
-    all_probs = []
-    all_labels = []
-    mid_point = 0.5
+    all_losses: list[np.floating] = []
+    all_preds: list[np.floating] = []
+    all_probs: list[np.floating] = []
+    all_labels: list[np.floating] = []
 
     for batch_data in train_loader:
         batch_loss, outputs, is_win = process_training_batch(
@@ -276,19 +280,17 @@ def train_step(
         all_losses.append(batch_loss)
 
         probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
-        preds = (probs > mid_point).astype(float)
+        preds = (probs > MID_POINT).astype(float)
 
         all_probs.extend(probs)
         all_preds.extend(preds)
         all_labels.extend(is_win.cpu().numpy().flatten())
 
-    avg_train_loss = np.mean(all_losses)
-
     metrics = calculate_metrics(
         y_true=np.array(all_labels),
         y_pred=np.array(all_preds),
         y_proba=np.array(all_probs),
-        loss=avg_train_loss,
+        loss=np.mean(all_losses),
     )
     return metrics, np.array(all_probs)
 
@@ -297,7 +299,7 @@ def calculate_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     y_proba: np.ndarray,
-    loss: float,
+    loss: np.floating[Any],
 ) -> MetricsResult:
     accuracy = accuracy_score(y_true, y_pred)
     precision = precision_score(
@@ -322,46 +324,6 @@ def calculate_metrics(
         auc=auc,
         confusion_matrix=cm,
     )
-
-
-class EarlyStopping:
-    """Simple early stopping."""
-
-    def __init__(self, patience: int = 5, delta: float = 0) -> None:
-        self.patience = patience
-        self.delta = delta
-        self.best_val_loss: float | None = None
-        self.best_metrics: MetricsResult | None = None
-        self.early_stop = False
-        self.counter = 0
-        self.best_model_state: dict[str, Any] | None = None
-
-    def __call__(
-        self,
-        val_loss: float,
-        metrics: MetricsResult,
-        model: RNNWinPredictor,
-    ) -> None:
-        score = -val_loss
-
-        if self.best_val_loss is None:
-            self.best_val_loss = score
-            self.best_metrics = metrics
-            self.best_model_state = model.state_dict()
-        elif score < self.best_val_loss + self.delta:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_val_loss = score
-            self.best_metrics = metrics
-            self.best_model_state = model.state_dict()
-            self.counter = 0
-
-    def load_best_model(self, model: RNNWinPredictor) -> None:
-        if self.best_model_state is None:
-            raise RuntimeError("Unexpected state")
-        model.load_state_dict(self.best_model_state)
 
 
 @dataclass
@@ -397,25 +359,10 @@ class TrainingArguments:
     scheduler_parameters: SchedulerParameters
     optimizer_parameters: OptimizerParameters
     batch_size: int
-    decision_weight: float
+    decision_weight: int
     epochs: int
     data: TrainingData
     pos_weight: torch.Tensor | None = None
-
-
-@dataclass
-class TrainingComponents:
-    """Components for training."""
-
-    criterion: nn.BCEWithLogitsLoss
-    optimizer: optim.Adam
-    scheduler: optim.lr_scheduler.ReduceLROnPlateau
-    early_stopping: EarlyStopping
-    callbacks: list[Callable[[None], None]] | None = None
-
-    def __post_init__(self) -> None:
-        if self.callbacks is None:
-            self.callbacks = []
 
 
 def train_epoch(
@@ -461,13 +408,12 @@ def train_model(
 ) -> tuple[RNNWinPredictor, MetricsResult]:
     model.to(device)
 
-    if training_arguments.pos_weight:
-        criterion = nn.BCEWithLogitsLoss(
-            reduction="none",
-            pos_weight=training_arguments.pos_weight,
-        )
-    else:
-        criterion = nn.BCEWithLogitsLoss(reduction="none")
+    criterion = nn.BCEWithLogitsLoss(
+        reduction="none",
+        pos_weight=training_arguments.pos_weight
+        if training_arguments.pos_weight
+        else None,
+    )
 
     optimizer = optim.AdamW(
         model.parameters(),
@@ -528,7 +474,9 @@ def compute_baseline_f1(
 
     # Compute F1-score for the baseline (using pos_label=1 for win prediction)
     baseline_f1: float = f1_score(
-        y_val, y_pred_baseline, pos_label=majority_class
+        y_val,
+        y_pred_baseline,
+        pos_label=majority_class,
     )
 
     # Also compute class distribution for context
@@ -554,141 +502,3 @@ def compute_pos_weight(decision_dataframe: pd.DataFrame) -> torch.Tensor:
     logger.info(f"Number of Loses {num_of_negatives}")
     logger.info(f"Pos Weight {pos_weight}")
     return pos_weight
-
-
-class ModelTrainer:
-    """Class responsible for model training."""
-
-    def __init__(self, csv_file_path: str) -> None:
-        self.csv_file_path = csv_file_path
-
-    def prepare_datasets(
-        self,
-    ) -> tuple[DotaDataset, DotaDataset, DotaDataset, torch.Tensor]:
-        matches_dataframe = load_personal_matches(self.csv_file_path)
-        pos_weight = compute_pos_weight(matches_dataframe)
-
-        train_dataframe, tmp_dataframe = train_test_split(
-            matches_dataframe,
-            test_size=0.2,
-            stratify=matches_dataframe["win"],
-        )
-        validation_dataframe, test_dataframe = train_test_split(
-            tmp_dataframe,
-            test_size=0.5,
-            stratify=tmp_dataframe["win"],
-        )
-        augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
-        logger.info(
-            f"Size of augmented dataset {len(augmented_train_dataframe)}",
-        )
-        prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
-        prepared_test_dataframe = prepare_dataframe(test_dataframe)
-
-        compute_baseline_f1(
-            augmented_train_dataframe["win"],
-            prepared_test_dataframe["win"],
-        )
-
-        train_dataset = DotaDataset(augmented_train_dataframe)
-        val_dataset = DotaDataset(prepared_validation_dataframe)
-        test_dataset = DotaDataset(prepared_test_dataframe)
-        return train_dataset, val_dataset, test_dataset, pos_weight
-
-    def main(self) -> None:
-        """Model training entrypoint."""
-        train_dataset, val_dataset, test_dataset, pos_weight = (  # pylint: disable=W0612 # noqa: RUF059
-            self.prepare_datasets()
-        )
-
-        training_arguments = self.create_training_arguments(
-            train_dataset, val_dataset
-        )
-
-        model = self.create_model()
-        logger.info(
-            f"Model trainable parameters: {count_trainable_params(model)}",
-        )
-        trained_model, _ = train_model(
-            model,
-            training_arguments,
-        )
-
-        if training_arguments.pos_weight:
-            criterion = nn.BCEWithLogitsLoss(
-                reduction="none",
-                pos_weight=training_arguments.pos_weight,
-            )
-        else:
-            criterion = nn.BCEWithLogitsLoss(reduction="none")
-
-        metrics, _ = evaluate_model(
-            trained_model,
-            get_data_loader(
-                test_dataset,
-                training_arguments.batch_size,
-                ShuffleEnum.UNSHUFFLED,
-            ),
-            criterion,
-        )
-
-        logger.info("Test Metrics")
-        logger.info(metrics)
-
-        logger.info("--- Confusion Matrix ---")
-        header = f"{'':<12}" + "Pred: Loss    " + "Pred: Win     "
-        logger.info(header)
-        row1 = (
-            f"Actual: Loss  {metrics.confusion_matrix[0, 0]:<12}"  # type: ignore[index]
-            f"{metrics.confusion_matrix[0, 1]:<13}"  # type: ignore[index]
-        )
-        row2 = (
-            f"Actual: Win   {metrics.confusion_matrix[1, 0]:<12}"  # type: ignore[index]
-            f"{metrics.confusion_matrix[1, 1]:<13}"  # type: ignore[index]
-        )
-        logger.info(row1)
-        logger.info(row2)
-        logger.info("------------------------")
-
-        torch.save(
-            trained_model.state_dict(),
-            settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
-        )
-        logger.info(
-            "Training complete! Model saved as 'trained_model.pth'.",
-        )
-
-    def create_training_arguments(
-        self, train_dataset, val_dataset
-    ) -> TrainingArguments:
-        return TrainingArguments(
-            data=TrainingData(
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-            ),
-            pos_weight=None,
-            early_stopping_patience=19,
-            epochs=43,
-            optimizer_parameters=OptimizerParameters(
-                lr=0.000171071120586148,
-                weight_decay=1,
-            ),
-            scheduler_parameters=SchedulerParameters(
-                factor=0.5,
-                threshold=0.00321,
-                scheduler_patience=25,
-            ),
-            decision_weight=10,
-            batch_size=8,
-        )
-
-    @staticmethod
-    def create_model() -> RNNWinPredictor:
-        return RNNWinPredictor(
-            num_heroes,
-            embedding_dim=34,
-            gru_hidden_dim=27,
-            num_gru_layers=2,
-            dropout_rate=0.8,
-        )
-
