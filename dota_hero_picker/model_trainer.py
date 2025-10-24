@@ -1,13 +1,7 @@
 import json
 import logging
-from collections import Counter
-from collections.abc import Callable
-from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
-from typing import Any
 
-import numpy as np
 import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
@@ -108,7 +102,7 @@ class ModelTrainer:
             f"Size of augmented dataset {len(augmented_train_dataframe)}",
         )
         prepared_validation_dataframe = enrich_dataframe(
-            prepare_dataframe(validation_dataframe)
+            prepare_dataframe(validation_dataframe),
         )
         prepared_test_dataframe = enrich_dataframe(
             prepare_dataframe(test_dataframe)

@@ -38,7 +38,6 @@ TrainingExample = tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor,
 ]
 
 
@@ -80,7 +79,7 @@ def get_data_loader(
     dataset: Dataset[TrainingExample],
     batch_size: int,
     shuffle: ShuffleEnum = ShuffleEnum.SHUFFLED,
-) -> DataLoader[DotaDataset]:
+) -> DataLoader[TrainingExample]:
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle.value)
 
 
@@ -119,7 +118,7 @@ def process_evaluation_batch(
     model: RNNWinPredictor,
     batch_data: TrainingExample,
     criterion: nn.BCEWithLogitsLoss,
-):
+) -> tuple[np.floating[Any], torch.Tensor, torch.Tensor]:
     draft_sequence, hero_features, is_win, _ = [
         t.to(device) for t in batch_data
     ]
@@ -129,76 +128,6 @@ def process_evaluation_batch(
     loss = (per_sample_loss).mean()
 
     return loss.item(), outputs, is_win
-
-
-def process_training_batch(
-    model: RNNWinPredictor,
-    batch_data,
-    training_components,
-    decision_weight,
-) -> tuple[np.floating[Any], torch.Tensor, torch.Tensor]:
-    """
-    Process a single batch: forward pass, loss computation,
-    and optimization step.
-    """
-    draft_sequence, hero_features, is_win, is_my_decision = [
-        t.to(device) for t in batch_data
-    ]
-    training_components.optimizer.zero_grad()
-    outputs = model(draft_sequence, hero_features)
-
-    per_sample_loss = training_components.criterion(outputs, is_win)
-    weights = torch.where(
-        (is_my_decision == 1.0),
-        decision_weight,
-        1.0,
-    )
-    loss = (per_sample_loss * weights).mean()
-
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    training_components.optimizer.step()
-    return loss.item(), outputs, is_win
-
-
-def evaluate_model(
-    model: RNNWinPredictor,
-    loader: DataLoader[DotaDataset],
-    criterion: nn.BCEWithLogitsLoss,
-) -> tuple[MetricsResult, np.ndarray]:
-    model.eval()
-
-    all_losses = []
-    all_preds = []
-    all_probs = []
-    all_labels = []
-
-    with torch.no_grad():
-        for batch_data in loader:
-            batch_loss, outputs, is_win = process_evaluation_batch(
-                model,
-                batch_data,
-                criterion,
-            )
-
-            all_losses.append(batch_loss)
-
-            probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
-            preds = (probs > MID_POINT).astype(float)
-
-            all_probs.extend(probs)
-            all_preds.extend(preds)
-            all_labels.extend(is_win.cpu().numpy().flatten())
-
-    avg_loss = np.mean(all_losses)
-
-    metrics = calculate_metrics(
-        y_true=np.array(all_labels),
-        y_pred=np.array(all_preds),
-        y_proba=np.array(all_probs),
-        loss=avg_loss,
-    )
-    return metrics, np.array(all_probs)
 
 
 class EarlyStopping:
@@ -257,9 +186,79 @@ class TrainingComponents:
             self.callbacks = []
 
 
+def process_training_batch(
+    model: RNNWinPredictor,
+    batch_data: TrainingExample,
+    training_components: TrainingComponents,
+    decision_weight: int,
+) -> tuple[np.floating[Any], torch.Tensor, torch.Tensor]:
+    """
+    Process a single batch: forward pass, loss computation,
+    and optimization step.
+    """
+    draft_sequence, hero_features, is_win, is_my_decision = [
+        t.to(device) for t in batch_data
+    ]
+    training_components.optimizer.zero_grad()
+    outputs = model(draft_sequence, hero_features)
+
+    per_sample_loss = training_components.criterion(outputs, is_win)
+    weights = torch.where(
+        (is_my_decision == 1.0),
+        decision_weight,
+        1.0,
+    )
+    loss = (per_sample_loss * weights).mean()
+
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    training_components.optimizer.step()
+    return loss.item(), outputs, is_win
+
+
+def evaluate_model(
+    model: RNNWinPredictor,
+    loader: DataLoader[TrainingExample],
+    criterion: nn.BCEWithLogitsLoss,
+) -> tuple[MetricsResult, np.ndarray]:
+    model.eval()
+
+    all_losses: list[np.floating] = []
+    all_preds: list[np.floating] = []
+    all_probs: list[np.floating] = []
+    all_labels: list[np.floating] = []
+
+    with torch.no_grad():
+        for batch_data in loader:
+            batch_loss, outputs, is_win = process_evaluation_batch(
+                model,
+                batch_data,
+                criterion,
+            )
+
+            all_losses.append(batch_loss)
+
+            probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
+            preds = (probs > MID_POINT).astype(float)
+
+            all_probs.extend(probs)
+            all_preds.extend(preds)
+            all_labels.extend(is_win.cpu().numpy().flatten())
+
+    avg_loss = np.mean(all_losses)
+
+    metrics = calculate_metrics(
+        y_true=np.array(all_labels),
+        y_pred=np.array(all_preds),
+        y_proba=np.array(all_probs),
+        loss=avg_loss,
+    )
+    return metrics, np.array(all_probs)
+
+
 def train_step(
     model: RNNWinPredictor,
-    train_loader: DataLoader[DotaDataset],
+    train_loader: DataLoader[TrainingExample],
     training_components: TrainingComponents,
     decision_weight: int,
 ) -> tuple[MetricsResult, np.ndarray]:

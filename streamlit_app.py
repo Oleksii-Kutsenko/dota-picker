@@ -327,6 +327,40 @@ current_seq = build_draft_sequence(
     opponent_picks_multiselect,
 )
 
+
+def calculate_baseline_probability(
+    model,
+    team_picks,
+    opponent_picks,
+):
+    baseline_ids = build_draft_sequence(
+        team_picks,
+        opponent_picks,
+    )
+    hero_features = [
+        hero_data_manager.get_hero_features(draft_id)
+        for draft_id in baseline_ids
+    ]
+
+    baseline_tensor = torch.tensor(
+        [baseline_ids],
+        dtype=torch.long,
+        device=device,
+    )
+    hero_features_tensor = torch.tensor(
+        [hero_features],
+        dtype=torch.long,
+        device=device,
+    )
+
+    with torch.no_grad():
+        baseline_logits = model(
+            baseline_tensor,
+            hero_features_tensor,
+        )
+        return torch.sigmoid(baseline_logits).item()
+
+
 if st.button("Get Suggestions"):
     try:
         allowed = (
@@ -341,32 +375,11 @@ if st.button("Get Suggestions"):
         st.subheader("Top Suggested Picks (as next team pick)")
         for idx, (hero, probability) in enumerate(suggestions, 1):
             st.write(f"#{idx} {hero} (Win Prob: {probability * 100:.2f}%)")
-        baseline_ids = build_draft_sequence(
+        baseline_prob = calculate_baseline_probability(
+            loaded_model,
             team_picks_multiselect,
             opponent_picks_multiselect,
         )
-        hero_features = [
-            hero_data_manager.get_hero_features(draft_id)
-            for draft_id in baseline_ids
-        ]
-
-        baseline_tensor = torch.tensor(
-            [baseline_ids],
-            dtype=torch.long,
-            device=device,
-        )
-        hero_features_tensor = torch.tensor(
-            [hero_features],
-            dtype=torch.long,
-            device=device,
-        )
-
-        with torch.no_grad():
-            baseline_logits = loaded_model(
-                baseline_tensor,
-                hero_features_tensor,
-            )
-            baseline_prob = torch.sigmoid(baseline_logits).item()
         st.metric(
             "Baseline Win Prob (no new pick)",
             f"{baseline_prob * 100:.2f}%",

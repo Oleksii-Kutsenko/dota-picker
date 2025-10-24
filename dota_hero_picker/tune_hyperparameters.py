@@ -102,14 +102,15 @@ def create_objective(
 ) -> Callable[[Trial], tuple[float, float, float]]:
     num_heroes = len(HeroDataManager().raw_hero_data)
     matches_dataframe = ModelTrainer(
-        model_trainer.csv_file_path
+        model_trainer.csv_file_path,
     ).create_matches_dataframe()
 
     pos_weight = compute_pos_weight(matches_dataframe)
 
     def objective(trial: Trial) -> tuple[float, float, float]:
         use_pos_weight = trial.suggest_categorical(
-            "use_pos_weight", [False, True]
+            "use_pos_weight",
+            [False, True],
         )
 
         embedding_dim = trial.suggest_categorical(

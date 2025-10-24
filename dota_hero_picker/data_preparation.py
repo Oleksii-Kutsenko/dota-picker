@@ -10,11 +10,7 @@ logger = logging.getLogger(__name__)
 
 MAX_PICK = 5
 # hero_data = get_hero_data()
-hero_names = []
 # hero_name_2_model_id = {}
-model_id_2_hero_name = {}
-model_id_2_hero_data = {}
-api_id_2_model_id = {}
 # num_heroes = len(hero_data)
 # for model_id, hero in enumerate(hero_data, 1):
 #     hero_name = hero["localized_name"]

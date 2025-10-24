@@ -10,9 +10,8 @@ SEQ_LEN = 9
 
 @dataclass
 class NNParameters:
-    """
-    Parameters for the neural network
-    """
+    """Parameters for the neural network."""
+
     num_heroes: int
     embedding_dim: int
     gru_hidden_dim: int
@@ -22,9 +21,7 @@ class NNParameters:
 
 
 class RNNWinPredictor(nn.Module):
-    """
-    Dota 2 match win predictor
-    """
+    """Dota 2 match win predictor."""
 
     def __init__(
         self,
@@ -92,7 +89,10 @@ class RNNWinPredictor(nn.Module):
         _, hidden = self.gru(combined_input)
         if self.bidirectional:
             hidden = hidden.view(
-                self.num_gru_layers, 2, batch_size, self.gru_hidden_dim
+                self.num_gru_layers,
+                2,
+                batch_size,
+                self.gru_hidden_dim,
             )
             last_layer = hidden[-1]
             final_hidden = torch.cat([last_layer[0], last_layer[1]], dim=-1)
