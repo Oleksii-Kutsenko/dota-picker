@@ -1,12 +1,11 @@
 import csv
 import datetime
 import logging
-import os
 import sys
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import pandas as pd
 import requests
@@ -17,7 +16,7 @@ HEROES_FILE = "heroes.json"
 API_MATCHES_ENDPOINT = "https://api.opendota.com/api/players/{}/matches"
 API_MATCH_DETAILS_ENDPOINT = "https://api.opendota.com/api/matches/{}"
 API_HEROES_ENDPOINT = "https://api.opendota.com/api/heroes"
-CURRENT_PATCH_START = datetime.datetime(2025, 8, 15)
+CURRENT_PATCH_START = datetime.datetime(2025, 8, 15, tzinfo=datetime.UTC)
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -28,12 +27,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def read_existing_matches(csv_path: str) -> tuple[list[int], int]:
-    if not os.path.exists(csv_path):
+def read_existing_matches(csv_path: str) -> tuple[set[int], int | None]:
+    if not Path(csv_path).exists():
         return set(), None
     match_ids = set()
     max_start_time = None
-    with open(csv_path, "r", newline="", encoding="utf-8") as csvfile:
+    with Path(csv_path).open(
+        newline="",
+        encoding="utf-8",
+    ) as csvfile:
         reader = csv.reader(csvfile)
         next(reader, None)  # Skip header
         for row in reader:
@@ -45,10 +47,10 @@ def read_existing_matches(csv_path: str) -> tuple[list[int], int]:
 
 
 def prepare_picks(
-    picks_bans: list[dict[str, Any]],
+    picks_bans: list[dict[str, Any]] | None,
     actually_picked_heroes: dict[int, list[int]],
     your_team: int,
-):
+) -> tuple[list[int], list[int]]:
     opp_team = 1 - your_team
 
     if not picks_bans:
@@ -86,8 +88,21 @@ def prepare_picks(
     return team_picks, opp_picks
 
 
-def parse_draft(match: dict[str, list], account_id: int) -> dict[str, Any]:
+PICKS_NUMBER = 10
+
+
+class MatchDict(TypedDict):
+    """Match dict."""
+
+    players: list[dict[str, int]] | None
+    picks_bans: list[dict[str, int]] | None
+    radiant_win: int
+
+
+def parse_draft(match: MatchDict, account_id: int) -> dict[str, Any] | None:
     players = match.get("players")
+    if players is None:
+        return None
     picks_bans = match.get("picks_bans")
 
     your_player = None
@@ -113,10 +128,12 @@ def parse_draft(match: dict[str, list], account_id: int) -> dict[str, Any]:
         return None
 
     team_picks, opp_picks = prepare_picks(
-        picks_bans, actually_picked_heroes, your_team
+        picks_bans,
+        actually_picked_heroes,
+        your_team,
     )
 
-    if len(team_picks) + len(opp_picks) != 10:
+    if len(team_picks) + len(opp_picks) != PICKS_NUMBER:
         msg = "Picks parsing failed"
         raise RuntimeError(msg)
 

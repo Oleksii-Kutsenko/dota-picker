@@ -13,7 +13,6 @@ from dota_hero_picker.neural_network import RNNWinPredictor
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-hero_data = HeroDataManager().raw_hero_data
 hero_positions = {
     "Troll Warlord": [1, 2],
     "Ogre Magi": [4, 5],
@@ -143,8 +142,6 @@ hero_positions = {
     "Void Spirit": [2, 3],
 }
 
-heroes = [hero_data_item["localized_name"] for hero_data_item in hero_data]
-num_heroes = len(heroes)
 hero_data_manager = HeroDataManager()
 
 
@@ -153,20 +150,29 @@ def build_draft_sequence(
     opponent_picks: list[str],
     candidate: str | None = None,
 ) -> list[int]:
-    team_picks = [h for h in team_picks if h in hero_data_manager.local_name_2_model_id]
+    local_team_picks = team_picks.copy()
     if candidate:
-        team_picks.append(candidate)
-    opponent_picks = [
-        h for h in opponent_picks if h in hero_data_manager.local_name_2_model_id
-    ]
+        local_team_picks.append(candidate)
 
-    team_ids = [hero_data_manager.local_name_2_model_id[h] for h in team_picks]
-    opp_ids = [hero_data_manager.local_name_2_model_id[h] for h in opponent_picks]
+    team_ids = [
+        hero_data_manager.get_hero_id_by_localized_name(h)
+        for h in local_team_picks
+    ]
+    opp_ids = [
+        hero_data_manager.get_hero_id_by_localized_name(h)
+        for h in opponent_picks
+    ]
 
     team_ids += [0] * (MAX_PICK - len(team_ids))
     opp_ids += [0] * (4 - len(opp_ids))
 
-    return team_ids[:2] + opp_ids[:2] + team_ids[2:4] + opp_ids[2:4] + team_ids[4:]
+    return (
+        team_ids[:2]
+        + opp_ids[:2]
+        + team_ids[2:4]
+        + opp_ids[2:4]
+        + team_ids[4:]
+    )
 
 
 def evaluate_candidate(
@@ -208,18 +214,24 @@ def suggest_best_picks(
 ) -> list[tuple[str, float]]:
     model.eval()
     results = []
-    for candidate_hero in heroes:
-        if candidate_hero in team_picks or candidate_hero in opponent_picks:
+    for hero_data in hero_data_manager.get_heroes().values():
+        if (
+            hero_data.localized_name in team_picks
+            or hero_data.localized_name in opponent_picks
+        ):
             continue
 
-        hero_pos = hero_positions.get(candidate_hero, [1, 2, 3, 4, 5])
+        hero_pos = hero_positions.get(
+            hero_data.localized_name,
+            [1, 2, 3, 4, 5],
+        )
         if not any(pos in allowed_positions for pos in hero_pos):
             continue
 
         results.append(
             evaluate_candidate(
                 model,
-                candidate_hero,
+                hero_data.localized_name,
                 team_picks,
                 opponent_picks,
             ),
@@ -235,7 +247,7 @@ model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
 
 if model_path.exists():
     loaded_model = ModelTrainer.create_model(
-        len(HeroDataManager().raw_hero_data),
+        HeroDataManager().get_heroes_number(),
     )
     loaded_model.load_state_dict(torch.load(model_path))
     loaded_model.to(device)
@@ -274,8 +286,16 @@ def on_opponent_change() -> None:
     ]
 
 
-team_options = [h for h in heroes if h not in st.session_state.opponent_picks]
-opponent_options = [h for h in heroes if h not in st.session_state.team_picks]
+team_options = [
+    hero_data.localized_name
+    for hero_data in hero_data_manager.get_heroes().values()
+    if hero_data.localized_name not in st.session_state.opponent_picks
+]
+opponent_options = [
+    hero_data.localized_name
+    for hero_data in hero_data_manager.get_heroes().values()
+    if hero_data.localized_name not in st.session_state.team_picks
+]
 team_picks_multiselect = st.multiselect(
     "Your Team Picks (up to 5)",
     options=team_options,
@@ -326,7 +346,8 @@ def calculate_baseline_probability(
         opponent_picks,
     )
     hero_features = [
-        hero_data_manager.get_hero_features(draft_id) for draft_id in baseline_ids
+        hero_data_manager.get_hero_features(draft_id)
+        for draft_id in baseline_ids
     ]
 
     baseline_tensor = torch.tensor(
@@ -350,7 +371,9 @@ def calculate_baseline_probability(
 
 if st.button("Get Suggestions"):
     try:
-        allowed = selected_positions if selected_positions else position_options
+        allowed = (
+            selected_positions if selected_positions else position_options
+        )
         suggestions = suggest_best_picks(
             loaded_model,
             team_picks_multiselect,

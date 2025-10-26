@@ -199,6 +199,7 @@ def process_training_batch(
     draft_sequence, hero_features, is_win, is_my_decision = [
         t.to(device) for t in batch_data
     ]
+
     training_components.optimizer.zero_grad()
     outputs = model(draft_sequence, hero_features)
 
@@ -360,9 +361,9 @@ class TrainingArguments:
     optimizer_parameters: OptimizerParameters
     batch_size: int
     decision_weight: int
-    epochs: int
     data: TrainingData
     pos_weight: torch.Tensor | None = None
+    epochs: int = 75
 
 
 def train_epoch(
