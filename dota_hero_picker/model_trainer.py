@@ -67,15 +67,13 @@ class ModelTrainer:
             )
             matches_dataframe[column] = matches_dataframe[column].apply(
                 lambda hero_list: [
-                    self.hero_data_manager.api_id_2_model_id[api_id]
+                    self.hero_data_manager.get_hero_id_by_api_id(api_id)
                     for api_id in hero_list
                 ],
             )
         matches_dataframe["picked_hero"] = matches_dataframe[
             "picked_hero"
-        ].apply(
-            lambda api_id: self.hero_data_manager.api_id_2_model_id[api_id],
-        )
+        ].map(self.hero_data_manager.get_hero_id_by_api_id)
 
         return matches_dataframe
 
@@ -105,7 +103,7 @@ class ModelTrainer:
             prepare_dataframe(validation_dataframe),
         )
         prepared_test_dataframe = enrich_dataframe(
-            prepare_dataframe(test_dataframe)
+            prepare_dataframe(test_dataframe),
         )
 
         compute_baseline_f1(
@@ -129,7 +127,7 @@ class ModelTrainer:
             val_dataset,
         )
 
-        model = self.create_model(len(self.hero_data_manager.raw_hero_data))
+        model = self.create_model(self.hero_data_manager.get_heroes_number())
         logger.info(
             f"Model trainable parameters: {count_trainable_params(model)}",
         )
@@ -193,19 +191,18 @@ class ModelTrainer:
                 val_dataset=val_dataset,
             ),
             pos_weight=None,
-            early_stopping_patience=2,
-            epochs=39,
+            early_stopping_patience=30,
             optimizer_parameters=OptimizerParameters(
-                lr=0.00321158166331838,
-                weight_decay=0.000132588918788133,
+                lr=0.00911924947294867,
+                weight_decay=7.37762749399911e-05,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.55,
-                scheduler_patience=23,
-                threshold=0.00424181379120684,
+                factor=0.540326054047348,
+                scheduler_patience=19,
+                threshold=0.788443519341978,
             ),
-            decision_weight=6,
-            batch_size=256,
+            decision_weight=12,
+            batch_size=64,
         )
 
     @staticmethod
@@ -216,7 +213,7 @@ class ModelTrainer:
                 embedding_dim=16,
                 gru_hidden_dim=64,
                 num_gru_layers=1,
-                dropout_rate=0.4,
-                bidirectional=True,
-            )
+                dropout_rate=0.334346243172681,
+                bidirectional=False,
+            ),
         )

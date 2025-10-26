@@ -37,7 +37,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
                     "draft_sequence": padded_draft_sequence,
                     "win": win,
                     "is_my_decision": is_my_decision,
-                }
+                },
             )
 
         team_picks = row.opponent_picks
@@ -60,7 +60,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
                     "draft_sequence": padded_draft_sequence,
                     "win": win,
                     "is_my_decision": 0,
-                }
+                },
             )
 
     return pd.DataFrame(results)
@@ -90,7 +90,7 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
                 "draft_sequence": padded_draft_sequence,
                 "win": row.win,
                 "is_my_decision": 1,
-            }
+            },
         )
 
     return pd.DataFrame(prepared_rows)
@@ -100,15 +100,16 @@ def enrich_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     results = []
     hero_data_manager = HeroDataManager()
     for _, row in dataframe.iterrows():
-        hero_features = []
-        for hero_id in row.draft_sequence:
-            hero_features.append(hero_data_manager.get_hero_features(hero_id))
+        hero_features = [
+            hero_data_manager.get_hero_features(hero_id)
+            for hero_id in row.draft_sequence
+        ]
         results.append(
             {
                 "draft_sequence": row.draft_sequence,
                 "hero_features": hero_features,
                 "win": row.win,
                 "is_my_decision": row.is_my_decision,
-            }
+            },
         )
     return pd.DataFrame(results)

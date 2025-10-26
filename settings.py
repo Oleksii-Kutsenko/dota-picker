@@ -15,3 +15,9 @@ MODELS_FOLDER_PATH = Path("dota_hero_picker") / Path("models")
 HEROES_FILE = (
     Path("dota_hero_picker") / Path("constants") / Path("heroes.json")
 )
+ABILITIES_FILE = (
+    Path("dota_hero_picker") / Path("constants") / Path("abilities.json")
+)
+HERO_ABILITIES_FILE = (
+    Path("dota_hero_picker") / Path("constants") / Path("hero_abilities.json")
+)

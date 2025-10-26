@@ -67,7 +67,7 @@ def perform_cross_validation(
     training_arguments: TrainingArguments,
     nn_parameters: NNParameters,
 ) -> tuple[np.floating[Any], np.floating[Any], np.floating[Any], int]:
-    skf = StratifiedKFold(n_splits=4, shuffle=True)
+    skf = StratifiedKFold(n_splits=3, shuffle=True)
     folds_val_f1 = []
     folds_val_loss = []
     folds_val_auc = []
@@ -99,15 +99,15 @@ def perform_cross_validation(
 
 def create_objective(
     model_trainer: ModelTrainer,
-) -> Callable[[Trial], tuple[float, float, float]]:
-    num_heroes = len(HeroDataManager().raw_hero_data)
+) -> Callable[[Trial], tuple[float, float]]:
+    num_heroes = HeroDataManager().get_heroes_number()
     matches_dataframe = ModelTrainer(
         model_trainer.csv_file_path,
     ).create_matches_dataframe()
 
     pos_weight = compute_pos_weight(matches_dataframe)
 
-    def objective(trial: Trial) -> tuple[float, float, float]:
+    def objective(trial: Trial) -> tuple[float, float]:
         use_pos_weight = trial.suggest_categorical(
             "use_pos_weight",
             [False, True],
@@ -115,11 +115,20 @@ def create_objective(
 
         embedding_dim = trial.suggest_categorical(
             "embedding_dim",
-            [8, 16, 32, 64],
+            [
+                8,
+                16,
+                32,
+            ],
         )
         gru_hidden_dim = trial.suggest_categorical(
             "gru_hidden_dim",
-            [32, 64, 128, 256, 512],
+            [
+                16,
+                32,
+                64,
+                128,
+            ],
         )
         num_gru_layers = trial.suggest_int("num_gru_layers", 1, 3)
         bidirectional = trial.suggest_categorical(
@@ -128,9 +137,27 @@ def create_objective(
         )
 
         dropout_rate = (
-            trial.suggest_float("dropout_rate", 0.3, 0.7, step=0.05)
+            trial.suggest_float(
+                "dropout_rate",
+                0.3,
+                0.8,
+            )
             if num_gru_layers > 1
-            else trial.suggest_float("dropout_rate", 0.2, 0.5, step=0.05)
+            else trial.suggest_float(
+                "dropout_rate",
+                0.1,
+                0.5,
+            )
+        )
+        scheduler_patience = trial.suggest_int(
+            "scheduler_patience",
+            10,
+            25,
+        )
+        early_stopping_patience = trial.suggest_int(
+            "early_stopping_patience",
+            scheduler_patience + 3,
+            scheduler_patience + 14,
         )
 
         training_arguments = TrainingArguments(
@@ -139,42 +166,35 @@ def create_objective(
                 val_dataset=DotaDataset(pd.DataFrame()),
             ),
             pos_weight=pos_weight if use_pos_weight else None,
-            early_stopping_patience=(
-                trial.suggest_int(
-                    "early_stopping_patience",
-                    1,
-                    9,
-                )
-            ),
+            early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 5e-5, 5e-2, log=True),
+                lr=trial.suggest_float("lr", 1e-5, 1e-1, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
-                    1e-5,
+                    1e-6,
                     0.1,
                     log=True,
                 ),
             ),
-            epochs=trial.suggest_int("epochs", 15, 45),
             scheduler_parameters=SchedulerParameters(
-                factor=trial.suggest_float("factor", 0.3, 0.65, step=0.001),
+                factor=trial.suggest_float(
+                    "factor",
+                    0.3,
+                    0.65,
+                ),
                 threshold=trial.suggest_float(
                     "threshold",
                     0.001,
-                    0.1,
+                    1,
                     log=True,
                 ),
-                scheduler_patience=trial.suggest_int(
-                    "scheduler_patience",
-                    15,
-                    30,
-                ),
+                scheduler_patience=scheduler_patience,
             ),
             batch_size=trial.suggest_categorical(
                 "batch_size",
-                [32, 64, 128, 256],
+                [32, 64, 128, 256, 512],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 5, 11),
+            decision_weight=trial.suggest_int("decision_weight", 5, 15),
         )
 
         mean_f1, mean_val_loss, mean_val_auc, trainable_params = (
@@ -199,7 +219,7 @@ def create_objective(
         )
         trial.set_user_attr("model_val_auc", mean_val_auc)
 
-        return float(mean_f1), float(mean_val_loss), float(mean_val_auc)
+        return float(mean_f1), float(mean_val_auc)
 
     return objective
 
@@ -213,7 +233,7 @@ def main(csv_file_path: str) -> None:
 
     study = optuna.create_study(
         study_name="dota_win_predictor",
-        directions=["maximize", "minimize", "maximize"],
+        directions=["maximize", "maximize"],
         sampler=optuna.samplers.NSGAIIISampler(),
         storage="sqlite:///optuna_study.db",
         load_if_exists=True,
@@ -221,26 +241,16 @@ def main(csv_file_path: str) -> None:
 
     study.optimize(
         objective,
-        n_trials=500,
+        n_trials=400,
         show_progress_bar=True,
     )
-
-    def select_f1(trial: optuna.trial.FrozenTrial) -> float:
-        return float(trial.values[0])  # noqa: PD011
-
-    fig1 = optuna.visualization.plot_optimization_history(
-        study,
-        target=select_f1,
-        target_name="F1",
-    )
-    fig1.write_html("optimization_history.html")
 
     fig2 = optuna.visualization.plot_param_importances(study)
     fig2.write_html("param_importances.html")
 
     fig3 = optuna.visualization.plot_pareto_front(
         study,
-        target_names=["F1", "Val Loss", "AUC"],
+        target_names=["F1", "AUC"],
     )
     fig3.write_html("pareto_front.html")
 
