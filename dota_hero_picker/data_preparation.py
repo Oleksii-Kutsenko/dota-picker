@@ -96,9 +96,8 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(prepared_rows)
 
 
-def enrich_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+def enrich_dataframe(dataframe: pd.DataFrame, hero_data_manager: HeroDataManager) -> pd.DataFrame:
     results = []
-    hero_data_manager = HeroDataManager()
     for _, row in dataframe.iterrows():
         hero_features = [
             hero_data_manager.get_hero_features(hero_id)
