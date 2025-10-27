@@ -67,7 +67,7 @@ def perform_cross_validation(
     training_arguments: TrainingArguments,
     nn_parameters: NNParameters,
 ) -> tuple[np.floating[Any], np.floating[Any], np.floating[Any], int]:
-    skf = StratifiedKFold(n_splits=3, shuffle=True)
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
     folds_val_f1 = []
     folds_val_loss = []
     folds_val_auc = []
@@ -115,22 +115,19 @@ def create_objective(
 
         embedding_dim = trial.suggest_categorical(
             "embedding_dim",
-            [
-                8,
-                16,
-                32,
-            ],
+            [8, 16, 32, 64],
         )
         gru_hidden_dim = trial.suggest_categorical(
             "gru_hidden_dim",
             [
+                8,
                 16,
                 32,
                 64,
                 128,
             ],
         )
-        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 3)
+        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 4)
         bidirectional = trial.suggest_categorical(
             "bidirectional",
             [True, False],
@@ -139,24 +136,24 @@ def create_objective(
         dropout_rate = (
             trial.suggest_float(
                 "dropout_rate",
-                0.3,
+                0.2,
                 0.8,
             )
             if num_gru_layers > 1
             else trial.suggest_float(
                 "dropout_rate",
                 0.1,
-                0.5,
+                0.6,
             )
         )
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            10,
-            25,
+            1,
+            15,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            scheduler_patience + 3,
+            scheduler_patience + 1,
             scheduler_patience + 14,
         )
 
@@ -180,11 +177,11 @@ def create_objective(
                 factor=trial.suggest_float(
                     "factor",
                     0.3,
-                    0.65,
+                    0.8,
                 ),
                 threshold=trial.suggest_float(
                     "threshold",
-                    0.001,
+                    0.0001,
                     1,
                     log=True,
                 ),
@@ -192,9 +189,9 @@ def create_objective(
             ),
             batch_size=trial.suggest_categorical(
                 "batch_size",
-                [32, 64, 128, 256, 512],
+                [16, 32, 64, 128, 256, 512, 1024],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 5, 15),
+            decision_weight=trial.suggest_int("decision_weight", 5, 20),
         )
 
         mean_f1, mean_val_loss, mean_val_auc, trainable_params = (
@@ -234,14 +231,14 @@ def main(csv_file_path: str) -> None:
     study = optuna.create_study(
         study_name="dota_win_predictor",
         directions=["maximize", "maximize"],
-        sampler=optuna.samplers.NSGAIIISampler(),
+        sampler=optuna.samplers.GPSampler(),
         storage="sqlite:///optuna_study.db",
         load_if_exists=True,
     )
 
     study.optimize(
         objective,
-        n_trials=400,
+        n_trials=200,
         show_progress_bar=True,
     )
 

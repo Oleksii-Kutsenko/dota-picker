@@ -200,7 +200,7 @@ class HeroDataManager:
         )
         raw_abilities = loader.load_json(ABILITIES_FILE)
         raw_hero_abilities = loader.load_json(HERO_ABILITIES_FILE)
-        assert isinstance(raw_abilities, list)
+        assert isinstance(raw_abilities, dict)
         assert isinstance(raw_hero_abilities, dict)
 
         processor = HeroProcessor(raw_abilities, raw_hero_abilities)
