@@ -78,16 +78,16 @@ class DataLoader:
         return data
 
     @staticmethod
-    def load_hero_json(file_path: Path) -> list[RawHeroData]:
+    def load_hero_json(file_path: Path) -> dict[str, RawHeroData]:
         with file_path.open(encoding="utf-8") as f:
             data = json.load(f)
-            assert isinstance(data, list)
+            assert isinstance(data, dict)
             return data
 
     @staticmethod
     def load_json(
         file_path: Path,
-    ) -> dict[str, Any] | list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         with file_path.open(encoding="utf-8") as f:
             data = json.load(f)
             assert isinstance(data, (list, dict))
@@ -101,16 +101,19 @@ class HeroProcessor:
 
     def __init__(
         self,
+        raw_heroes: list[RawHeroData],
         raw_abilities: list[dict[Any, Any]],
         raw_hero_abilities: dict[Any, Any],
     ) -> None:
         self.raw_abilities = raw_abilities
         self.raw_hero_abilities = raw_hero_abilities
         self.role_vector: list[str] = []
+        self.primary_attr_vector = ["agi", "str", "int"]
+        self.build_role_vector(raw_heroes)
 
     def build_role_vector(self, raw_heroes: list[RawHeroData]) -> list[str]:
         unique_roles = set()
-        for hero in raw_heroes:
+        for hero in raw_heroes.values():
             if "roles" in hero:
                 unique_roles.update(hero["roles"])
         self.role_vector = sorted(unique_roles)
@@ -119,6 +122,7 @@ class HeroProcessor:
     def process_hero(self, raw_hero: RawHeroData, model_id: int) -> HeroData:
         attributes = self._build_attributes(raw_hero)
         abilities = self._build_abilities(raw_hero["name"])
+        breakpoint()
 
         return HeroData(
             model_id=model_id,
@@ -136,6 +140,33 @@ class HeroProcessor:
                 1 if role in raw_hero["roles"] else 0
                 for role in self.role_vector
             ],
+            "primary_attr": [
+                1 if primary_attr == raw_hero["primary_attr"] else 0
+                for primary_attr in self.primary_attr_vector
+            ],
+            "base_health": raw_hero["base_health"],
+            "base_health_regen": raw_hero["base_health_regen"],
+            "base_mana": raw_hero["base_mana"],
+            "base_mana_regen": raw_hero["base_mana_regen"],
+            "base_armor": raw_hero["base_armor"],
+            "base_mr": raw_hero["base_mr"],
+            "base_attack_min": raw_hero["base_attack_min"],
+            "base_attack_max": raw_hero["base_attack_max"],
+            "base_str": raw_hero["base_str"],
+            "base_agi": raw_hero["base_agi"],
+            "base_int": raw_hero["base_int"],
+            "str_gain": raw_hero["str_gain"],
+            "agi_gain": raw_hero["agi_gain"],
+            "int_gain": raw_hero["int_gain"],
+            "attack_range": raw_hero["attack_range"],
+            "projectile_speed": raw_hero["projectile_speed"],
+            "attack_rate": raw_hero["attack_rate"],
+            "base_attack_time": raw_hero["base_attack_time"],
+            "attack_point": raw_hero["attack_point"],
+            "move_speed": raw_hero["move_speed"],
+            "turn_rate": raw_hero["turn_rate"],
+            "day_vision": raw_hero["day_vision"],
+            "night_vision": raw_hero["night_vision"],
         }
 
     def _build_abilities(self, hero_name: str) -> HeroAbilitiesDict:
@@ -189,7 +220,7 @@ class HeroRegistry:
 class HeroDataManager:
     """Class for the hero data interactions."""
 
-    HERO_FEATURES_NUM = 10
+    HERO_FEATURES_NUM = 13
     STUN_NAME = "STUN"
 
     def __init__(self) -> None:
@@ -200,14 +231,16 @@ class HeroDataManager:
         )
         raw_abilities = loader.load_json(ABILITIES_FILE)
         raw_hero_abilities = loader.load_json(HERO_ABILITIES_FILE)
+
         assert isinstance(raw_abilities, dict)
         assert isinstance(raw_hero_abilities, dict)
 
-        processor = HeroProcessor(raw_abilities, raw_hero_abilities)
-        self.role_vector = processor.build_role_vector(raw_heroes)
+        processor = HeroProcessor(
+            raw_heroes, raw_abilities, raw_hero_abilities
+        )
 
         self._registry = HeroRegistry()
-        for model_id, raw_hero in enumerate(raw_heroes, start=1):
+        for model_id, raw_hero in enumerate(raw_heroes.values(), start=1):
             hero = processor.process_hero(raw_hero, model_id)
             self._registry.register(hero)
 
@@ -225,6 +258,7 @@ class HeroDataManager:
             [attributes["is_melee"]]
             + [abilities["has_stun"]]
             + attributes["roles"]
+            + attributes["primary_attr"]
         )
 
     def get_hero_id_by_localized_name(self, localized_name: str) -> int:
