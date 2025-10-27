@@ -3,7 +3,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
+import pandas as pd
 import requests
+from sklearn.preprocessing import StandardScaler
 
 from manage import DotaPickerError
 from settings import (
@@ -105,11 +107,78 @@ class HeroProcessor:
         raw_abilities: list[dict[Any, Any]],
         raw_hero_abilities: dict[Any, Any],
     ) -> None:
+        self.scaler = StandardScaler()
+        self.processed_heroes = self.process_heroes(raw_heroes)
         self.raw_abilities = raw_abilities
         self.raw_hero_abilities = raw_hero_abilities
         self.role_vector: list[str] = []
-        self.primary_attr_vector = ["agi", "str", "int"]
+        self.primary_attr_vector = ["agi", "str", "int", "all"]
         self.build_role_vector(raw_heroes)
+
+    def process_heroes(self, heroes: list[RawHeroData]) -> pd.DataFrame:
+        dataframe = pd.DataFrame(
+            heroes.values(),
+            columns=[
+                # "id",
+                # "name",
+                # "localized_name",
+                "primary_attr",
+                "roles",
+                "attack_type",
+                # "base_health",
+                "base_health_regen",
+                "base_mana",
+                "base_mana_regen",
+                "base_armor",
+                "base_mr",
+                "base_attack_min",
+                "base_attack_max",
+                "base_str",
+                "base_agi",
+                "base_int",
+                "str_gain",
+                "agi_gain",
+                "int_gain",
+                "attack_range",
+                "projectile_speed",
+                "attack_rate",
+                "base_attack_time",
+                "attack_point",
+                "move_speed",
+                "turn_rate",
+                "day_vision",
+                "night_vision",
+            ],
+        )
+        numeric_cols = [
+            # "base_health",
+            "base_health_regen",
+            "base_mana",
+            "base_mana_regen",
+            "base_armor",
+            "base_mr",
+            "base_attack_min",
+            "base_attack_max",
+            "base_str",
+            "base_agi",
+            "base_int",
+            "str_gain",
+            "agi_gain",
+            "int_gain",
+            "attack_range",
+            "projectile_speed",
+            "attack_rate",
+            "base_attack_time",
+            "attack_point",
+            "move_speed",
+            "turn_rate",
+            "day_vision",
+            "night_vision",
+        ]
+        dataframe[numeric_cols] = self.scaler.fit_transform(
+            dataframe[numeric_cols]
+        )
+        return dataframe
 
     def build_role_vector(self, raw_heroes: list[RawHeroData]) -> list[str]:
         unique_roles = set()
@@ -122,7 +191,6 @@ class HeroProcessor:
     def process_hero(self, raw_hero: RawHeroData, model_id: int) -> HeroData:
         attributes = self._build_attributes(raw_hero)
         abilities = self._build_abilities(raw_hero["name"])
-        breakpoint()
 
         return HeroData(
             model_id=model_id,
@@ -220,7 +288,7 @@ class HeroRegistry:
 class HeroDataManager:
     """Class for the hero data interactions."""
 
-    HERO_FEATURES_NUM = 13
+    HERO_FEATURES_NUM = 14
     STUN_NAME = "STUN"
 
     def __init__(self) -> None:
@@ -235,13 +303,13 @@ class HeroDataManager:
         assert isinstance(raw_abilities, dict)
         assert isinstance(raw_hero_abilities, dict)
 
-        processor = HeroProcessor(
+        self.processor = HeroProcessor(
             raw_heroes, raw_abilities, raw_hero_abilities
         )
 
         self._registry = HeroRegistry()
         for model_id, raw_hero in enumerate(raw_heroes.values(), start=1):
-            hero = processor.process_hero(raw_hero, model_id)
+            hero = self.processor.process_hero(raw_hero, model_id)
             self._registry.register(hero)
 
     def get_heroes_number(self) -> int:
@@ -253,7 +321,7 @@ class HeroDataManager:
         hero_data = self._registry.get_hero_by_hero_id(model_id)
         attributes = hero_data.attributes
         abilities = hero_data.abilities
-
+        breakpoint()
         return (
             [attributes["is_melee"]]
             + [abilities["has_stun"]]

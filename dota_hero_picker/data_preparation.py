@@ -1,5 +1,6 @@
 import logging
 
+import numpy as np
 import pandas as pd
 
 from dota_hero_picker.hero_data_manager import HeroDataManager
@@ -96,19 +97,19 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(prepared_rows)
 
 
-def enrich_dataframe(dataframe: pd.DataFrame, hero_data_manager: HeroDataManager) -> pd.DataFrame:
-    results = []
-    for _, row in dataframe.iterrows():
-        hero_features = [
-            hero_data_manager.get_hero_features(hero_id)
-            for hero_id in row.draft_sequence
-        ]
-        results.append(
-            {
-                "draft_sequence": row.draft_sequence,
-                "hero_features": hero_features,
-                "win": row.win,
-                "is_my_decision": row.is_my_decision,
-            },
+def enrich_dataframe(
+    dataframe: pd.DataFrame, hero_data_manager: HeroDataManager
+) -> pd.DataFrame:
+    def get_sequence_features(draft_seq):
+        return np.array(
+            [
+                hero_data_manager.get_hero_features(hero_id)
+                for hero_id in draft_seq
+            ]
         )
+
+    dataframe["hero_features"] = dataframe["draft_sequence"].apply(
+        get_sequence_features
+    )
+    breakpoint()
     return pd.DataFrame(results)
