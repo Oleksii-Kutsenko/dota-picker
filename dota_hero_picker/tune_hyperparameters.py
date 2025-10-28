@@ -34,6 +34,8 @@ from .neural_network import (
 
 logger = logging.getLogger(__name__)
 
+hero_data_manager = HeroDataManager()
+
 
 def perform_fold(
     matches_dataframe: pd.DataFrame,
@@ -45,8 +47,12 @@ def perform_fold(
     train_df = matches_dataframe.iloc[train_idx]
     val_df = matches_dataframe.iloc[val_idx]
 
-    augmented_train = enrich_dataframe(create_augmented_dataframe(train_df))
-    prepared_val = enrich_dataframe(prepare_dataframe(val_df))
+    augmented_train = enrich_dataframe(
+        create_augmented_dataframe(train_df), hero_data_manager
+    )
+    prepared_val = enrich_dataframe(
+        prepare_dataframe(val_df), hero_data_manager
+    )
     train_dataset = DotaDataset(augmented_train)
     val_dataset = DotaDataset(prepared_val)
 
@@ -66,11 +72,14 @@ def perform_cross_validation(
     matches_dataframe: pd.DataFrame,
     training_arguments: TrainingArguments,
     nn_parameters: NNParameters,
-) -> tuple[np.floating[Any], np.floating[Any], np.floating[Any], int]:
+) -> tuple[
+    np.floating[Any], np.floating[Any], np.floating[Any], np.floating[Any], int
+]:
     skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
     folds_val_f1 = []
     folds_val_loss = []
     folds_val_auc = []
+    folds_val_mcc = []
 
     for train_idx, val_idx in skf.split(
         matches_dataframe,
@@ -89,17 +98,19 @@ def perform_cross_validation(
         folds_val_f1.append(metrics.f1)
         folds_val_loss.append(metrics.loss)
         folds_val_auc.append(metrics.auc)
+        folds_val_mcc.append(metrics.mcc)
     return (
         np.mean(folds_val_f1),
         np.mean(folds_val_loss),
         np.mean(folds_val_auc),
+        np.mean(folds_val_mcc),
         count_trainable_params(model),
     )
 
 
 def create_objective(
     model_trainer: ModelTrainer,
-) -> Callable[[Trial], tuple[float, float]]:
+) -> Callable[[Trial], tuple[float, float, float]]:
     num_heroes = HeroDataManager().get_heroes_number()
     matches_dataframe = ModelTrainer(
         model_trainer.csv_file_path,
@@ -107,7 +118,7 @@ def create_objective(
 
     pos_weight = compute_pos_weight(matches_dataframe)
 
-    def objective(trial: Trial) -> tuple[float, float]:
+    def objective(trial: Trial) -> tuple[float, float, float]:
         use_pos_weight = trial.suggest_categorical(
             "use_pos_weight",
             [False, True],
@@ -115,7 +126,7 @@ def create_objective(
 
         embedding_dim = trial.suggest_categorical(
             "embedding_dim",
-            [8, 16, 32, 64],
+            [8, 16, 32, 64, 128],
         )
         gru_hidden_dim = trial.suggest_categorical(
             "gru_hidden_dim",
@@ -125,9 +136,10 @@ def create_objective(
                 32,
                 64,
                 128,
+                256,
             ],
         )
-        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 4)
+        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 5)
         bidirectional = trial.suggest_categorical(
             "bidirectional",
             [True, False],
@@ -168,7 +180,7 @@ def create_objective(
                 lr=trial.suggest_float("lr", 1e-5, 1e-1, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
-                    1e-6,
+                    1e-7,
                     0.1,
                     log=True,
                 ),
@@ -177,11 +189,11 @@ def create_objective(
                 factor=trial.suggest_float(
                     "factor",
                     0.3,
-                    0.8,
+                    0.9,
                 ),
                 threshold=trial.suggest_float(
                     "threshold",
-                    0.0001,
+                    0.00001,
                     1,
                     log=True,
                 ),
@@ -194,29 +206,31 @@ def create_objective(
             decision_weight=trial.suggest_int("decision_weight", 5, 20),
         )
 
-        mean_f1, mean_val_loss, mean_val_auc, trainable_params = (
-            perform_cross_validation(
-                matches_dataframe,
-                training_arguments,
-                NNParameters(
-                    num_heroes=num_heroes,
-                    embedding_dim=embedding_dim,
-                    gru_hidden_dim=gru_hidden_dim,
-                    num_gru_layers=num_gru_layers,
-                    dropout_rate=dropout_rate,
-                    bidirectional=bidirectional,
-                ),
-            )
+        (
+            mean_f1,
+            mean_val_loss,
+            mean_val_auc,
+            mean_val_mcc,
+            trainable_params,
+        ) = perform_cross_validation(
+            matches_dataframe,
+            training_arguments,
+            NNParameters(
+                num_heroes=num_heroes,
+                embedding_dim=embedding_dim,
+                gru_hidden_dim=gru_hidden_dim,
+                num_gru_layers=num_gru_layers,
+                dropout_rate=dropout_rate,
+                bidirectional=bidirectional,
+            ),
         )
 
-        trial.set_user_attr("mean_val_loss", mean_val_loss)
         trial.set_user_attr(
             "model_trainable_params",
             trainable_params,
         )
-        trial.set_user_attr("model_val_auc", mean_val_auc)
 
-        return float(mean_f1), float(mean_val_auc)
+        return float(mean_val_mcc)
 
     return objective
 
@@ -230,15 +244,16 @@ def main(csv_file_path: str) -> None:
 
     study = optuna.create_study(
         study_name="dota_win_predictor",
-        directions=["maximize", "maximize"],
-        sampler=optuna.samplers.GPSampler(),
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(),
         storage="sqlite:///optuna_study.db",
         load_if_exists=True,
     )
 
+    # TODO: check that everything is working (n_tirals=2)
     study.optimize(
         objective,
-        n_trials=200,
+        timeout=60 * 60 * 7,
         show_progress_bar=True,
     )
 
@@ -247,7 +262,7 @@ def main(csv_file_path: str) -> None:
 
     fig3 = optuna.visualization.plot_pareto_front(
         study,
-        target_names=["F1", "AUC"],
+        target_names=["F1", "AUC", "MCC"],
     )
     fig3.write_html("pareto_front.html")
 

@@ -196,18 +196,18 @@ class ModelTrainer:
                 val_dataset=val_dataset,
             ),
             pos_weight=None,
-            early_stopping_patience=10,
+            early_stopping_patience=25,
             optimizer_parameters=OptimizerParameters(
-                lr=0.0601038185470329,
-                weight_decay=0.00501072067158172,
+                lr=0.067307507600804,
+                weight_decay=0.000001,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.519916762205359,
-                scheduler_patience=5,
-                threshold=0.00191458921235781,
+                factor=0.8,
+                scheduler_patience=13,
+                threshold=0.0001,
             ),
-            decision_weight=11,
-            batch_size=32,
+            decision_weight=15,
+            batch_size=256,
         )
 
     @staticmethod
@@ -215,10 +215,10 @@ class ModelTrainer:
         return RNNWinPredictor(
             NNParameters(
                 num_heroes=num_heroes,
-                embedding_dim=16,
-                gru_hidden_dim=16,
-                num_gru_layers=1,
-                dropout_rate=0.488481187387336,
+                embedding_dim=64,
+                gru_hidden_dim=128,
+                num_gru_layers=4,
+                dropout_rate=0.746944748796439,
                 bidirectional=False,
             ),
         )

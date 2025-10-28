@@ -12,6 +12,7 @@ from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
     f1_score,
+    matthews_corrcoef,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -93,6 +94,7 @@ class MetricsResult:
     recall: float
     f1: float
     auc: float
+    mcc: float
     confusion_matrix: np.ndarray | None = None
 
     def to_dict(self) -> dict[str, float | np.floating[Any]]:
@@ -109,8 +111,9 @@ class MetricsResult:
         return (
             f"Loss: {self.loss:.4f}, Acc: {self.accuracy:.4f}, "
             f"Prec: {self.precision:.4f}, Rec: {self.recall:.4f}, "
-            f"F1: {self.f1:.4f}"
-            + (f", AUC: {self.auc:.4f}" if self.auc else "")
+            f"F1: {self.f1:.4f}, "
+            f"AUC: {self.auc:.4f}, "
+            f"MCC: {self.mcc:.4f}"
         )
 
 
@@ -309,12 +312,13 @@ def calculate_metrics(
         zero_division=0,
     )
     recall = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0, average="macro")
     auc = roc_auc_score(y_true, y_proba)
     cm = confusion_matrix(
         y_true,
         y_pred,
     )
+    mcc = matthews_corrcoef(y_true, y_pred)
 
     return MetricsResult(
         loss=loss,
@@ -324,6 +328,7 @@ def calculate_metrics(
         f1=f1,
         auc=auc,
         confusion_matrix=cm,
+        mcc=mcc,
     )
 
 
@@ -477,7 +482,7 @@ def compute_baseline_f1(
     baseline_f1: float = f1_score(
         y_val,
         y_pred_baseline,
-        pos_label=majority_class,
+        average="macro",
     )
 
     # Also compute class distribution for context

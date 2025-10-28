@@ -39,7 +39,7 @@ class RNNWinPredictor(nn.Module):
         self.bidirectional = nn_parameters.bidirectional
 
         self.feature_dim = (
-            nn_parameters.embedding_dim + HeroDataManager.HERO_FEATURES_NUM
+            nn_parameters.embedding_dim + len(HeroDataManager.FEATURES)
         )
         self.gru = nn.GRU(
             self.feature_dim,

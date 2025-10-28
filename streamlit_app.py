@@ -214,15 +214,12 @@ def suggest_best_picks(
 ) -> list[tuple[str, float]]:
     model.eval()
     results = []
-    for hero_data in hero_data_manager.get_heroes().values():
-        if (
-            hero_data.localized_name in team_picks
-            or hero_data.localized_name in opponent_picks
-        ):
+    for localized_name in hero_data_manager.get_heroes_localized_names():
+        if localized_name in team_picks or localized_name in opponent_picks:
             continue
 
         hero_pos = hero_positions.get(
-            hero_data.localized_name,
+            localized_name,
             [1, 2, 3, 4, 5],
         )
         if not any(pos in allowed_positions for pos in hero_pos):
@@ -231,7 +228,7 @@ def suggest_best_picks(
         results.append(
             evaluate_candidate(
                 model,
-                hero_data.localized_name,
+                localized_name,
                 team_picks,
                 opponent_picks,
             ),
@@ -287,14 +284,14 @@ def on_opponent_change() -> None:
 
 
 team_options = [
-    hero_data.localized_name
-    for hero_data in hero_data_manager.get_heroes().values()
-    if hero_data.localized_name not in st.session_state.opponent_picks
+    localized_name
+    for localized_name in hero_data_manager.get_heroes_localized_names()
+    if localized_name not in st.session_state.opponent_picks
 ]
 opponent_options = [
-    hero_data.localized_name
-    for hero_data in hero_data_manager.get_heroes().values()
-    if hero_data.localized_name not in st.session_state.team_picks
+    localized_name
+    for localized_name in hero_data_manager.get_heroes_localized_names()
+    if localized_name not in st.session_state.team_picks
 ]
 team_picks_multiselect = st.multiselect(
     "Your Team Picks (up to 5)",

@@ -111,5 +111,4 @@ def enrich_dataframe(
     dataframe["hero_features"] = dataframe["draft_sequence"].apply(
         get_sequence_features
     )
-    breakpoint()
-    return pd.DataFrame(results)
+    return dataframe

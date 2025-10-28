@@ -3,9 +3,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
+import numpy as np
 import pandas as pd
 import requests
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
 
 from manage import DotaPickerError
 from settings import (
@@ -99,29 +100,28 @@ class DataLoader:
 class HeroProcessor:
     """Processes raw hero data into structured format."""
 
-    STUN_NAME = "STUN"
+    STUN_NAME = "stun"
 
     def __init__(
         self,
         raw_heroes: list[RawHeroData],
-        raw_abilities: list[dict[Any, Any]],
+        raw_abilities: dict[str, Any],
         raw_hero_abilities: dict[Any, Any],
     ) -> None:
         self.scaler = StandardScaler()
-        self.processed_heroes = self.process_heroes(raw_heroes)
-        self.raw_abilities = raw_abilities
-        self.raw_hero_abilities = raw_hero_abilities
-        self.role_vector: list[str] = []
-        self.primary_attr_vector = ["agi", "str", "int", "all"]
-        self.build_role_vector(raw_heroes)
+        self.process_heroes(raw_heroes)
+        self.process_abilities(raw_abilities)
+        self.process_hero_abilties(raw_hero_abilities)
+        self.merge_and_assign_stun()
 
-    def process_heroes(self, heroes: list[RawHeroData]) -> pd.DataFrame:
+    def process_heroes(self, heroes: list[RawHeroData]) -> None:
+        heroes_number = len(heroes)
         dataframe = pd.DataFrame(
             heroes.values(),
             columns=[
-                # "id",
-                # "name",
-                # "localized_name",
+                "id",
+                "name",
+                "localized_name",
                 "primary_attr",
                 "roles",
                 "attack_type",
@@ -150,6 +150,14 @@ class HeroProcessor:
                 "night_vision",
             ],
         )
+        dataframe["base_health_regen"].fillna(
+            dataframe["base_health_regen"].median(), inplace=True
+        )
+
+        dataframe["turn_rate"].fillna(
+            dataframe["turn_rate"].median(), inplace=True
+        )
+        dataframe["hero_id"] = range(1, heroes_number + 1)
         numeric_cols = [
             # "base_health",
             "base_health_regen",
@@ -178,79 +186,98 @@ class HeroProcessor:
         dataframe[numeric_cols] = self.scaler.fit_transform(
             dataframe[numeric_cols]
         )
-        return dataframe
 
-    def build_role_vector(self, raw_heroes: list[RawHeroData]) -> list[str]:
-        unique_roles = set()
-        for hero in raw_heroes.values():
-            if "roles" in hero:
-                unique_roles.update(hero["roles"])
-        self.role_vector = sorted(unique_roles)
-        return self.role_vector
-
-    def process_hero(self, raw_hero: RawHeroData, model_id: int) -> HeroData:
-        attributes = self._build_attributes(raw_hero)
-        abilities = self._build_abilities(raw_hero["name"])
-
-        return HeroData(
-            model_id=model_id,
-            api_id=int(raw_hero["id"]),
-            name=raw_hero["name"],
-            localized_name=raw_hero["localized_name"],
-            attributes=attributes,
-            abilities=abilities,
+        dataframe = pd.get_dummies(
+            dataframe, columns=["primary_attr"], dtype=int
+        )
+        mlb = MultiLabelBinarizer()
+        roles_encoded = mlb.fit_transform(dataframe["roles"])
+        roles_df = pd.DataFrame(
+            roles_encoded,
+            columns=mlb.classes_,
+        )
+        dataframe = pd.concat(
+            [dataframe.drop("roles", axis=1), roles_df], axis=1
         )
 
-    def _build_attributes(self, raw_hero: RawHeroData) -> HeroAttributesDict:
-        return {
-            "is_melee": 1 if raw_hero["attack_type"] == "Melee" else 0,
-            "roles": [
-                1 if role in raw_hero["roles"] else 0
-                for role in self.role_vector
-            ],
-            "primary_attr": [
-                1 if primary_attr == raw_hero["primary_attr"] else 0
-                for primary_attr in self.primary_attr_vector
-            ],
-            "base_health": raw_hero["base_health"],
-            "base_health_regen": raw_hero["base_health_regen"],
-            "base_mana": raw_hero["base_mana"],
-            "base_mana_regen": raw_hero["base_mana_regen"],
-            "base_armor": raw_hero["base_armor"],
-            "base_mr": raw_hero["base_mr"],
-            "base_attack_min": raw_hero["base_attack_min"],
-            "base_attack_max": raw_hero["base_attack_max"],
-            "base_str": raw_hero["base_str"],
-            "base_agi": raw_hero["base_agi"],
-            "base_int": raw_hero["base_int"],
-            "str_gain": raw_hero["str_gain"],
-            "agi_gain": raw_hero["agi_gain"],
-            "int_gain": raw_hero["int_gain"],
-            "attack_range": raw_hero["attack_range"],
-            "projectile_speed": raw_hero["projectile_speed"],
-            "attack_rate": raw_hero["attack_rate"],
-            "base_attack_time": raw_hero["base_attack_time"],
-            "attack_point": raw_hero["attack_point"],
-            "move_speed": raw_hero["move_speed"],
-            "turn_rate": raw_hero["turn_rate"],
-            "day_vision": raw_hero["day_vision"],
-            "night_vision": raw_hero["night_vision"],
-        }
+        dataframe["attack_type"] = dataframe["attack_type"] == "Melee"
+        dataframe["attack_type"] = dataframe["attack_type"].astype(int)
+        self.processed_heroes = dataframe
 
-    def _build_abilities(self, hero_name: str) -> HeroAbilitiesDict:
-        abilities_dict: HeroAbilitiesDict = {"has_stun": 0}
+    def process_abilities(self, raw_abilities: dict[str, Any]) -> None:
+        abilities_dataframe = pd.DataFrame.from_dict(
+            raw_abilities, orient="index"
+        )
 
-        hero_ability_data = self.raw_hero_abilities.get(hero_name, {})
-        ability_names = hero_ability_data.get("abilities", [])
+        def has_stun_indicator(attrib_list):
+            if not isinstance(attrib_list, list):
+                return False
+            for d in attrib_list:
+                if isinstance(d, dict):
+                    key_lower = d.get("key", "").lower()
+                    header_lower = d.get("header", "").lower()
+                    if "stun" in key_lower or "stun" in header_lower:
+                        return True
+            return False
 
-        for ability_name in ability_names:
-            if ability_name in self.raw_abilities:
-                ability_data = str(self.raw_abilities[ability_name])
-                if self.STUN_NAME in ability_data:
-                    abilities_dict["has_stun"] = 1
-                    break
+        vectorized_check = np.vectorize(has_stun_indicator)
+        abilities_dataframe["has_stun"] = vectorized_check(
+            abilities_dataframe["attrib"].values
+        )
 
-        return abilities_dict
+        abilities_dataframe = abilities_dataframe[["has_stun"]]
+        abilities_dataframe = abilities_dataframe.reset_index(drop=False)
+        abilities_dataframe.rename(
+            columns={"index": "abilities"}, inplace=True
+        )
+        self.processed_abilities = abilities_dataframe
+
+    def process_hero_abilties(
+        self, raw_hero_abilities: dict[str, Any]
+    ) -> None:
+        # TODO: Parse facets
+        self.processed_hero_abilites = pd.DataFrame.from_dict(
+            raw_hero_abilities, orient="index"
+        ).reset_index(drop=False)
+        self.processed_hero_abilites.rename(
+            columns={"index": "name"}, inplace=True
+        )
+
+    def merge_and_assign_stun(self):
+        merged_df = pd.merge(
+            self.processed_heroes,
+            self.processed_hero_abilites[["name", "abilities"]],
+            on="name",
+            how="left",
+        )
+
+        exploded_hero_abil = merged_df[["hero_id", "name", "abilities"]]
+        exploded_hero_abil = exploded_hero_abil.explode("abilities").dropna(
+            subset=["abilities"]
+        )
+
+        exploded_with_stun = pd.merge(
+            exploded_hero_abil,
+            self.processed_abilities[["abilities", "has_stun"]],
+            on="abilities",
+            how="left",
+        )
+        exploded_with_stun["has_stun"] = (
+            exploded_with_stun["has_stun"].fillna(0).astype(int)
+        )
+
+        stun_per_hero = (
+            exploded_with_stun.groupby("hero_id")["has_stun"]
+            .any()
+            .astype(int)
+            .reset_index()
+        )
+
+        final_df = pd.merge(merged_df, stun_per_hero, on="hero_id", how="left")
+        final_df["has_stun"] = final_df["has_stun"].fillna(0).astype(int)
+
+        final_df.drop(["abilities"], axis=1, inplace=True, errors="ignore")
+        self.processed_heroes = final_df
 
 
 class HeroRegistry:
@@ -288,7 +315,45 @@ class HeroRegistry:
 class HeroDataManager:
     """Class for the hero data interactions."""
 
-    HERO_FEATURES_NUM = 14
+    FEATURES = [
+        "hero_id",
+        "attack_type",
+        "base_health_regen",
+        "base_mana",
+        "base_mana_regen",
+        "base_armor",
+        "base_mr",
+        "base_attack_min",
+        "base_attack_max",
+        "base_str",
+        "base_agi",
+        "base_int",
+        "str_gain",
+        "agi_gain",
+        "int_gain",
+        "attack_range",
+        "projectile_speed",
+        "attack_rate",
+        "base_attack_time",
+        "attack_point",
+        "move_speed",
+        "turn_rate",
+        "day_vision",
+        "night_vision",
+        "primary_attr_agi",
+        "primary_attr_all",
+        "primary_attr_int",
+        "primary_attr_str",
+        "Carry",
+        "Disabler",
+        "Durable",
+        "Escape",
+        "Initiator",
+        "Nuker",
+        "Pusher",
+        "Support",
+    ]
+
     STUN_NAME = "STUN"
 
     def __init__(self) -> None:
@@ -307,35 +372,28 @@ class HeroDataManager:
             raw_heroes, raw_abilities, raw_hero_abilities
         )
 
-        self._registry = HeroRegistry()
-        for model_id, raw_hero in enumerate(raw_heroes.values(), start=1):
-            hero = self.processor.process_hero(raw_hero, model_id)
-            self._registry.register(hero)
-
     def get_heroes_number(self) -> int:
-        return self._registry.get_heroes_number()
+        return len(self.processor.processed_heroes)
 
-    def get_hero_features(self, model_id: int) -> list[int]:
-        if model_id == 0:
-            return [0] * self.HERO_FEATURES_NUM
-        hero_data = self._registry.get_hero_by_hero_id(model_id)
-        attributes = hero_data.attributes
-        abilities = hero_data.abilities
-        breakpoint()
-        return (
-            [attributes["is_melee"]]
-            + [abilities["has_stun"]]
-            + attributes["roles"]
-            + attributes["primary_attr"]
-        )
+    def get_hero_features(self, hero_id: int) -> list[int]:
+        if hero_id == 0:
+            return [0] * len(self.FEATURES)
+        hero_row = self.processor.processed_heroes.loc[
+            self.processor.processed_heroes["hero_id"] == hero_id
+        ]
+        return hero_row[self.FEATURES].iloc[0].values
 
     def get_hero_id_by_localized_name(self, localized_name: str) -> int:
         """Get model ID by localized hero name."""
-        hero = self._registry.get_hero_by_localized_name(localized_name)
-        return hero.model_id
+        hero_id = self.processor.processed_heroes.loc[
+            self.processor.processed_heroes["localized_name"] == localized_name
+        ].iloc[0]["hero_id"]
+        return hero_id
 
-    def get_heroes(self) -> dict[int, HeroData]:
-        return self._registry.get_heroes()
+    def get_heroes_localized_names(self) -> dict[int, HeroData]:
+        return self.processor.processed_heroes["localized_name"].tolist()
 
     def get_hero_id_by_api_id(self, api_id: int) -> int:
-        return self._registry.get_hero_id_by_api_id(api_id)
+        return self.processor.processed_heroes.loc[
+            self.processor.processed_heroes["id"] == api_id
+        ].iloc[0]["hero_id"]
