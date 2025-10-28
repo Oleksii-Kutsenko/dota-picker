@@ -48,10 +48,12 @@ def perform_fold(
     val_df = matches_dataframe.iloc[val_idx]
 
     augmented_train = enrich_dataframe(
-        create_augmented_dataframe(train_df), hero_data_manager
+        create_augmented_dataframe(train_df),
+        hero_data_manager,
     )
     prepared_val = enrich_dataframe(
-        prepare_dataframe(val_df), hero_data_manager
+        prepare_dataframe(val_df),
+        hero_data_manager,
     )
     train_dataset = DotaDataset(augmented_train)
     val_dataset = DotaDataset(prepared_val)
@@ -72,13 +74,8 @@ def perform_cross_validation(
     matches_dataframe: pd.DataFrame,
     training_arguments: TrainingArguments,
     nn_parameters: NNParameters,
-) -> tuple[
-    np.floating[Any], np.floating[Any], np.floating[Any], np.floating[Any], int
-]:
+) -> tuple[np.floating[Any], int]:
     skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-    folds_val_f1 = []
-    folds_val_loss = []
-    folds_val_auc = []
     folds_val_mcc = []
 
     for train_idx, val_idx in skf.split(
@@ -95,14 +92,8 @@ def perform_cross_validation(
             training_arguments,
         )
 
-        folds_val_f1.append(metrics.f1)
-        folds_val_loss.append(metrics.loss)
-        folds_val_auc.append(metrics.auc)
         folds_val_mcc.append(metrics.mcc)
     return (
-        np.mean(folds_val_f1),
-        np.mean(folds_val_loss),
-        np.mean(folds_val_auc),
         np.mean(folds_val_mcc),
         count_trainable_params(model),
     )
@@ -207,9 +198,6 @@ def create_objective(
         )
 
         (
-            mean_f1,
-            mean_val_loss,
-            mean_val_auc,
             mean_val_mcc,
             trainable_params,
         ) = perform_cross_validation(
@@ -250,21 +238,16 @@ def main(csv_file_path: str) -> None:
         load_if_exists=True,
     )
 
-    # TODO: check that everything is working (n_tirals=2)
     study.optimize(
         objective,
         timeout=60 * 60 * 7,
         show_progress_bar=True,
     )
+    fig = optuna.visualization.plot_optimization_history(study)
+    fig.write_html("optimization_history.html")
 
     fig2 = optuna.visualization.plot_param_importances(study)
     fig2.write_html("param_importances.html")
-
-    fig3 = optuna.visualization.plot_pareto_front(
-        study,
-        target_names=["F1", "AUC", "MCC"],
-    )
-    fig3.write_html("pareto_front.html")
 
     trials_df = study.trials_dataframe()
     trials_df.to_csv("optuna_trials.csv", index=False)

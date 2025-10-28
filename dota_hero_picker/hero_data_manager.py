@@ -236,16 +236,18 @@ class HeroProcessor:
         self, raw_hero_abilities: dict[str, Any]
     ) -> None:
         # TODO: Parse facets
-        self.processed_hero_abilites = pd.DataFrame.from_dict(
-            raw_hero_abilities, orient="index"
+        hero_abilities_dataframe = pd.DataFrame.from_dict(
+            raw_hero_abilities,
+            orient="index",
         ).reset_index(drop=False)
-        self.processed_hero_abilites.rename(
-            columns={"index": "name"}, inplace=True
+        breakpoint()
+        hero_abilities_dataframe = hero_abilities_dataframe.rename(
+            columns={"index": "name"},
         )
+        self.processed_hero_abilites = hero_abilities_dataframe
 
     def merge_and_assign_stun(self):
-        merged_df = pd.merge(
-            self.processed_heroes,
+        merged_df = self.processed_heroes.merge(
             self.processed_hero_abilites[["name", "abilities"]],
             on="name",
             how="left",
@@ -253,11 +255,10 @@ class HeroProcessor:
 
         exploded_hero_abil = merged_df[["hero_id", "name", "abilities"]]
         exploded_hero_abil = exploded_hero_abil.explode("abilities").dropna(
-            subset=["abilities"]
+            subset=["abilities"],
         )
 
-        exploded_with_stun = pd.merge(
-            exploded_hero_abil,
+        exploded_with_stun = exploded_hero_abil.merge(
             self.processed_abilities[["abilities", "has_stun"]],
             on="abilities",
             how="left",
@@ -273,10 +274,10 @@ class HeroProcessor:
             .reset_index()
         )
 
-        final_df = pd.merge(merged_df, stun_per_hero, on="hero_id", how="left")
+        final_df = merged_df.merge(stun_per_hero, on="hero_id", how="left")
         final_df["has_stun"] = final_df["has_stun"].fillna(0).astype(int)
 
-        final_df.drop(["abilities"], axis=1, inplace=True, errors="ignore")
+        final_df = final_df.drop(["abilities"], axis=1, errors="ignore")
         self.processed_heroes = final_df
 
 
@@ -315,7 +316,7 @@ class HeroRegistry:
 class HeroDataManager:
     """Class for the hero data interactions."""
 
-    FEATURES = [
+    FEATURES = (
         "hero_id",
         "attack_type",
         "base_health_regen",
@@ -352,7 +353,7 @@ class HeroDataManager:
         "Nuker",
         "Pusher",
         "Support",
-    ]
+    )
 
     STUN_NAME = "STUN"
 
@@ -369,7 +370,9 @@ class HeroDataManager:
         assert isinstance(raw_hero_abilities, dict)
 
         self.processor = HeroProcessor(
-            raw_heroes, raw_abilities, raw_hero_abilities
+            raw_heroes,
+            raw_abilities,
+            raw_hero_abilities,
         )
 
     def get_heroes_number(self) -> int:
@@ -381,14 +384,13 @@ class HeroDataManager:
         hero_row = self.processor.processed_heroes.loc[
             self.processor.processed_heroes["hero_id"] == hero_id
         ]
-        return hero_row[self.FEATURES].iloc[0].values
+        return hero_row[self.FEATURES].iloc[0].to_numpy()
 
     def get_hero_id_by_localized_name(self, localized_name: str) -> int:
         """Get model ID by localized hero name."""
-        hero_id = self.processor.processed_heroes.loc[
+        return self.processor.processed_heroes.loc[
             self.processor.processed_heroes["localized_name"] == localized_name
         ].iloc[0]["hero_id"]
-        return hero_id
 
     def get_heroes_localized_names(self) -> dict[int, HeroData]:
         return self.processor.processed_heroes["localized_name"].tolist()
