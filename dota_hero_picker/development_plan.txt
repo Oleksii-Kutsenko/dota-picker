@@ -1,6 +1,6 @@
 All traning and models will be relevant only for current patch. This decision related to the futher updates, I want to incorporate hero features to the input vector, and it's hard to collect historical heroes features, and incorporate them properly (hero re-works).
 
-Update input vector—fetch from OpenDota heroes.json (abilities for binaries like has_dispel; attributes: primary, melee, base stats).
+Update input vector—fetch from OpenDota heroes.json (abilities for binaries like has_dispel
 Optimize hyperparameters: Use Optuna to tune model hyperparameters (e.g., learning rate, embedding dimensions, FM latent factors) with a focus on personalization metrics, running trials on your validation set for 50-100 iterations.
 optimizer_type ('Adam', 'AdamW', 'SGD', 'RMSprop')
 momentum (0.0 to 0.99)

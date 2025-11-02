@@ -48,24 +48,39 @@ class DotaDataset(Dataset[TrainingExample]):
     def __init__(
         self,
         dataframe: pd.DataFrame,
-        max_picks_per_team: int = 5,
     ) -> None:
-        self.dataframe = dataframe
-        self.max_len = max_picks_per_team
+        self.draft_sequences = torch.tensor(
+            np.stack(dataframe["draft_sequence"].values),  # type: ignore[call-overload]
+            dtype=torch.long,
+            device=device,
+        )
+        self.hero_features = torch.tensor(
+            np.stack(dataframe["hero_features"].values),  # type: ignore[call-overload]
+            dtype=torch.float,
+            device=device,
+        )
+        self.wins = torch.tensor(
+            dataframe["win"].values,
+            dtype=torch.float,
+            device=device,
+        )
+        self.is_my_decisions = torch.tensor(
+            dataframe["is_my_decision"].values,
+            dtype=torch.long,
+            device=device,
+        )
 
     def __len__(self) -> int:
         """Return dataset length."""
-        return len(self.dataframe)
+        return len(self.draft_sequences)
 
     def __getitem__(self, idx: int) -> TrainingExample:
         """Return training example."""
-        row = self.dataframe.iloc[idx]
-
         return (
-            torch.tensor(row["draft_sequence"], dtype=torch.long),
-            torch.tensor(row["hero_features"], dtype=torch.float),
-            torch.tensor(row["win"], dtype=torch.float),
-            torch.tensor(row["is_my_decision"], dtype=torch.long),
+            self.draft_sequences[idx],
+            self.hero_features[idx],
+            self.wins[idx],
+            self.is_my_decisions[idx],
         )
 
 
@@ -81,14 +96,18 @@ def get_data_loader(
     batch_size: int,
     shuffle: ShuffleEnum = ShuffleEnum.SHUFFLED,
 ) -> DataLoader[TrainingExample]:
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle.value)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle.value,
+    )
 
 
 @dataclass
 class MetricsResult:
     """Training metrics."""
 
-    loss: np.floating[Any]
+    loss: float
     accuracy: float
     precision: float
     recall: float
@@ -121,16 +140,14 @@ def process_evaluation_batch(
     model: RNNWinPredictor,
     batch_data: TrainingExample,
     criterion: nn.BCEWithLogitsLoss,
-) -> tuple[np.floating[Any], torch.Tensor, torch.Tensor]:
-    draft_sequence, hero_features, is_win, _ = [
-        t.to(device) for t in batch_data
-    ]
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    draft_sequence, hero_features, is_win, _ = batch_data
+
     outputs = model(draft_sequence, hero_features)
     per_sample_loss = criterion(outputs, is_win)
+    loss = per_sample_loss.mean()
 
-    loss = (per_sample_loss).mean()
-
-    return loss.item(), outputs, is_win
+    return loss.detach(), outputs, is_win
 
 
 class EarlyStopping:
@@ -139,7 +156,7 @@ class EarlyStopping:
     def __init__(self, patience: int = 5, delta: float = 0) -> None:
         self.patience = patience
         self.delta = delta
-        self.best_val_loss: np.floating[Any] | None = None
+        self.best_val_loss: float | None = None
         self.best_metrics: MetricsResult | None = None
         self.early_stop = False
         self.counter = 0
@@ -147,7 +164,7 @@ class EarlyStopping:
 
     def __call__(
         self,
-        val_loss: np.floating[Any],
+        val_loss: float,
         metrics: MetricsResult,
         model: RNNWinPredictor,
     ) -> None:
@@ -194,16 +211,14 @@ def process_training_batch(
     batch_data: TrainingExample,
     training_components: TrainingComponents,
     decision_weight: int,
-) -> tuple[np.floating[Any], torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Process a single batch: forward pass, loss computation,
     and optimization step.
     """
-    draft_sequence, hero_features, is_win, is_my_decision = [
-        t.to(device) for t in batch_data
-    ]
+    draft_sequence, hero_features, is_win, is_my_decision = batch_data
 
-    training_components.optimizer.zero_grad()
+    training_components.optimizer.zero_grad(set_to_none=True)
     outputs = model(draft_sequence, hero_features)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
@@ -215,9 +230,9 @@ def process_training_batch(
     loss = (per_sample_loss * weights).mean()
 
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     training_components.optimizer.step()
-    return loss.item(), outputs, is_win
+
+    return loss.detach(), outputs, is_win
 
 
 def evaluate_model(
@@ -227,10 +242,9 @@ def evaluate_model(
 ) -> tuple[MetricsResult, np.ndarray]:
     model.eval()
 
-    all_losses: list[np.floating] = []
-    all_preds: list[np.floating] = []
-    all_probs: list[np.floating] = []
-    all_labels: list[np.floating] = []
+    all_losses: list[torch.Tensor] = []
+    all_probs_tensors: list[torch.Tensor] = []
+    all_labels_tensors: list[torch.Tensor] = []
 
     with torch.no_grad():
         for batch_data in loader:
@@ -242,22 +256,21 @@ def evaluate_model(
 
             all_losses.append(batch_loss)
 
-            probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
-            preds = (probs > MID_POINT).astype(float)
+            probs = torch.sigmoid(outputs)
+            all_probs_tensors.append(probs)
+            all_labels_tensors.append(is_win)
 
-            all_probs.extend(probs)
-            all_preds.extend(preds)
-            all_labels.extend(is_win.cpu().numpy().flatten())
+    avg_loss = torch.stack(all_losses).mean().item()
 
-    avg_loss = np.mean(all_losses)
+    all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
 
     metrics = calculate_metrics(
-        y_true=np.array(all_labels),
-        y_pred=np.array(all_preds),
-        y_proba=np.array(all_probs),
+        y_true=torch.cat(all_labels_tensors).cpu().numpy().flatten(),
+        y_pred=(all_probs > MID_POINT).astype(float),
+        y_proba=all_probs,
         loss=avg_loss,
     )
-    return metrics, np.array(all_probs)
+    return metrics, all_probs
 
 
 def train_step(
@@ -268,10 +281,9 @@ def train_step(
 ) -> tuple[MetricsResult, np.ndarray]:
     model.train()
 
-    all_losses: list[np.floating] = []
-    all_preds: list[np.floating] = []
-    all_probs: list[np.floating] = []
-    all_labels: list[np.floating] = []
+    all_losses: list[torch.Tensor] = []
+    all_probs_tensors: list[torch.Tensor] = []
+    all_labels_tensors: list[torch.Tensor] = []
 
     for batch_data in train_loader:
         batch_loss, outputs, is_win = process_training_batch(
@@ -283,27 +295,29 @@ def train_step(
 
         all_losses.append(batch_loss)
 
-        probs = torch.sigmoid(outputs).detach().cpu().numpy().flatten()
-        preds = (probs > MID_POINT).astype(float)
+        with torch.no_grad():
+            probs = torch.sigmoid(outputs)
+            all_probs_tensors.append(probs)
+            all_labels_tensors.append(is_win)
 
-        all_probs.extend(probs)
-        all_preds.extend(preds)
-        all_labels.extend(is_win.cpu().numpy().flatten())
+    avg_loss = torch.stack(all_losses).mean().item()
+
+    all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
 
     metrics = calculate_metrics(
-        y_true=np.array(all_labels),
-        y_pred=np.array(all_preds),
-        y_proba=np.array(all_probs),
-        loss=np.mean(all_losses),
+        y_true=torch.cat(all_labels_tensors).cpu().numpy().flatten(),
+        y_pred=(all_probs > MID_POINT).astype(float),
+        y_proba=all_probs,
+        loss=avg_loss,
     )
-    return metrics, np.array(all_probs)
+    return metrics, all_probs
 
 
 def calculate_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     y_proba: np.ndarray,
-    loss: np.floating[Any],
+    loss: float,
 ) -> MetricsResult:
     accuracy = accuracy_score(y_true, y_pred)
     precision = precision_score(
@@ -369,102 +383,6 @@ class TrainingArguments:
     data: TrainingData
     pos_weight: torch.Tensor | None = None
     epochs: int = 75
-
-
-def train_epoch(
-    epoch: int,
-    model: RNNWinPredictor,
-    training_arguments: TrainingArguments,
-    training_components: TrainingComponents,
-) -> None:
-    logger.info(f"Epoch {epoch + 1}/{training_arguments.epochs}")
-    train_loader = get_data_loader(
-        training_arguments.data.train_dataset,
-        training_arguments.batch_size,
-        ShuffleEnum.SHUFFLED,
-    )
-    val_loader = get_data_loader(
-        training_arguments.data.val_dataset,
-        training_arguments.batch_size,
-        ShuffleEnum.UNSHUFFLED,
-    )
-
-    metrics, _ = train_step(
-        model,
-        train_loader,
-        training_components,
-        training_arguments.decision_weight,
-    )
-    logger.info(metrics)
-
-    val_metrics, _ = evaluate_model(
-        model,
-        val_loader,
-        training_components.criterion,
-    )
-    logger.info(val_metrics)
-    training_components.scheduler.step(val_metrics.loss)
-
-    training_components.early_stopping(val_metrics.loss, val_metrics, model)
-
-
-def train_model(
-    model: RNNWinPredictor,
-    training_arguments: TrainingArguments,
-) -> tuple[RNNWinPredictor, MetricsResult]:
-    model.to(device)
-
-    criterion = nn.BCEWithLogitsLoss(
-        reduction="none",
-        pos_weight=training_arguments.pos_weight
-        if training_arguments.pos_weight
-        else None,
-    )
-
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=training_arguments.optimizer_parameters.lr,
-        weight_decay=training_arguments.optimizer_parameters.weight_decay,
-    )
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        "min",
-        factor=training_arguments.scheduler_parameters.factor,
-        threshold=training_arguments.scheduler_parameters.threshold,
-        patience=training_arguments.scheduler_parameters.scheduler_patience,
-    )
-
-    training_components = TrainingComponents(
-        criterion=criterion,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        early_stopping=EarlyStopping(
-            patience=training_arguments.early_stopping_patience,
-        ),
-    )
-    for epoch in range(training_arguments.epochs):
-        train_epoch(
-            epoch,
-            model,
-            training_arguments,
-            training_components,
-        )
-        if training_components.early_stopping.early_stop:
-            logger.info("Early stopping triggered.")
-            break
-
-    if (
-        training_components.early_stopping.best_val_loss is None
-        or training_components.early_stopping.best_metrics is None
-        or training_components.early_stopping.best_model_state is None
-    ):
-        msg = "Unexpected state"
-        raise RuntimeError(msg)
-    model.load_state_dict(training_components.early_stopping.best_model_state)
-    return (
-        model,
-        training_components.early_stopping.best_metrics,
-    )
 
 
 def compute_baseline_f1(

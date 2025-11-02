@@ -65,7 +65,7 @@ class DataLoader:
         cls,
         local_file: Path,
         endpoint: str,
-    ) -> list[RawHeroData]:
+    ) -> dict[str, RawHeroData]:
         if Path(local_file).exists():
             return cls.load_hero_json(local_file)
         response = requests.get(endpoint, timeout=5)
@@ -77,7 +77,7 @@ class DataLoader:
         data = response.json()
         with Path(local_file).open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        assert isinstance(data, list)
+        assert isinstance(data, dict)
         return data
 
     @staticmethod
@@ -93,7 +93,7 @@ class DataLoader:
     ) -> dict[str, Any]:
         with file_path.open(encoding="utf-8") as f:
             data = json.load(f)
-            assert isinstance(data, (list, dict))
+            assert isinstance(data, dict)
             return data
 
 
@@ -104,7 +104,7 @@ class HeroProcessor:
 
     def __init__(
         self,
-        raw_heroes: list[RawHeroData],
+        raw_heroes: dict[str, RawHeroData],
         raw_abilities: dict[str, Any],
         raw_hero_abilities: dict[Any, Any],
     ) -> None:
@@ -114,10 +114,11 @@ class HeroProcessor:
         self.process_hero_abilties(raw_hero_abilities)
         self.merge_and_assign_stun()
 
-    def process_heroes(self, heroes: list[RawHeroData]) -> None:
+    def process_heroes(self, heroes: dict[str, RawHeroData]) -> None:
         heroes_number = len(heroes)
+        hero_dicts = list(heroes.values())
         dataframe = pd.DataFrame(
-            heroes.values(),
+            hero_dicts,
             columns=[
                 "id",
                 "name",
@@ -150,12 +151,12 @@ class HeroProcessor:
                 "night_vision",
             ],
         )
-        dataframe["base_health_regen"].fillna(
-            dataframe["base_health_regen"].median(), inplace=True
+        dataframe["base_health_regen"] = dataframe["base_health_regen"].fillna(
+            dataframe["base_health_regen"].median(),
         )
 
-        dataframe["turn_rate"].fillna(
-            dataframe["turn_rate"].median(), inplace=True
+        dataframe["turn_rate"] = dataframe["turn_rate"].fillna(
+            dataframe["turn_rate"].median(),
         )
         dataframe["hero_id"] = range(1, heroes_number + 1)
         numeric_cols = [
@@ -184,11 +185,13 @@ class HeroProcessor:
             "night_vision",
         ]
         dataframe[numeric_cols] = self.scaler.fit_transform(
-            dataframe[numeric_cols]
+            dataframe[numeric_cols],
         )
 
         dataframe = pd.get_dummies(
-            dataframe, columns=["primary_attr"], dtype=int
+            dataframe,
+            columns=["primary_attr"],
+            dtype=int,
         )
         mlb = MultiLabelBinarizer()
         roles_encoded = mlb.fit_transform(dataframe["roles"])
@@ -197,7 +200,8 @@ class HeroProcessor:
             columns=mlb.classes_,
         )
         dataframe = pd.concat(
-            [dataframe.drop("roles", axis=1), roles_df], axis=1
+            [dataframe.drop("roles", axis=1), roles_df],
+            axis=1,
         )
 
         dataframe["attack_type"] = dataframe["attack_type"] == "Melee"
@@ -206,10 +210,11 @@ class HeroProcessor:
 
     def process_abilities(self, raw_abilities: dict[str, Any]) -> None:
         abilities_dataframe = pd.DataFrame.from_dict(
-            raw_abilities, orient="index"
+            raw_abilities,
+            orient="index",
         )
 
-        def has_stun_indicator(attrib_list):
+        def has_stun_indicator(attrib_list: list[dict[str, str]]) -> bool:
             if not isinstance(attrib_list, list):
                 return False
             for d in attrib_list:
@@ -222,31 +227,39 @@ class HeroProcessor:
 
         vectorized_check = np.vectorize(has_stun_indicator)
         abilities_dataframe["has_stun"] = vectorized_check(
-            abilities_dataframe["attrib"].values
+            abilities_dataframe["attrib"].to_numpy(),
         )
 
         abilities_dataframe = abilities_dataframe[["has_stun"]]
         abilities_dataframe = abilities_dataframe.reset_index(drop=False)
-        abilities_dataframe.rename(
-            columns={"index": "abilities"}, inplace=True
+        abilities_dataframe = abilities_dataframe.rename(
+            columns={"index": "abilities"},
         )
         self.processed_abilities = abilities_dataframe
 
     def process_hero_abilties(
-        self, raw_hero_abilities: dict[str, Any]
+        self,
+        raw_hero_abilities: dict[str, Any],
     ) -> None:
-        # TODO: Parse facets
-        hero_abilities_dataframe = pd.DataFrame.from_dict(
-            raw_hero_abilities,
-            orient="index",
-        ).reset_index(drop=False)
-        breakpoint()
-        hero_abilities_dataframe = hero_abilities_dataframe.rename(
-            columns={"index": "name"},
-        )
+        preprocessed_hero_abilities = []
+        for hero_name, hero_abilities_data in raw_hero_abilities.items():
+            preprocessed_hero_abilities.append(
+                {
+                    "name": hero_name,
+                    "abilities": hero_abilities_data["abilities"]
+                    + [
+                        ability
+                        for facets in hero_abilities_data["facets"]
+                        if facets.get("abilities")
+                        for ability in facets.get("abilities")
+                    ],
+                },
+            )
+
+        hero_abilities_dataframe = pd.DataFrame(preprocessed_hero_abilities)
         self.processed_hero_abilites = hero_abilities_dataframe
 
-    def merge_and_assign_stun(self):
+    def merge_and_assign_stun(self) -> None:
         merged_df = self.processed_heroes.merge(
             self.processed_hero_abilites[["name", "abilities"]],
             on="name",
@@ -359,7 +372,7 @@ class HeroDataManager:
 
     def __init__(self) -> None:
         loader = DataLoader()
-        raw_heroes: list[RawHeroData] = loader.get_hero_data(
+        raw_heroes: dict[str, RawHeroData] = loader.get_hero_data(
             HEROES_FILE,
             API_HEROES_ENDPOINT,
         )
@@ -384,18 +397,22 @@ class HeroDataManager:
         hero_row = self.processor.processed_heroes.loc[
             self.processor.processed_heroes["hero_id"] == hero_id
         ]
-        return hero_row[self.FEATURES].iloc[0].to_numpy()
+        return list(hero_row[list(self.FEATURES)].iloc[0].to_numpy())
 
     def get_hero_id_by_localized_name(self, localized_name: str) -> int:
         """Get model ID by localized hero name."""
-        return self.processor.processed_heroes.loc[
-            self.processor.processed_heroes["localized_name"] == localized_name
-        ].iloc[0]["hero_id"]
+        return int(
+            self.processor.processed_heroes.loc[
+                self.processor.processed_heroes["localized_name"]
+                == localized_name
+            ].iloc[0]["hero_id"],
+        )
 
-    def get_heroes_localized_names(self) -> dict[int, HeroData]:
+    def get_heroes_localized_names(self) -> list[str]:
         return self.processor.processed_heroes["localized_name"].tolist()
 
     def get_hero_id_by_api_id(self, api_id: int) -> int:
-        return self.processor.processed_heroes.loc[
+        hero_row = self.processor.processed_heroes.loc[
             self.processor.processed_heroes["id"] == api_id
-        ].iloc[0]["hero_id"]
+        ].iloc[0]
+        return int(hero_row["hero_id"])

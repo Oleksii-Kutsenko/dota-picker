@@ -98,17 +98,18 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
 
 
 def enrich_dataframe(
-    dataframe: pd.DataFrame, hero_data_manager: HeroDataManager
+    dataframe: pd.DataFrame,
+    hero_data_manager: HeroDataManager,
 ) -> pd.DataFrame:
-    def get_sequence_features(draft_seq):
+    def get_sequence_features(draft_seq: list[int]) -> np.ndarray:
         return np.array(
             [
                 hero_data_manager.get_hero_features(hero_id)
                 for hero_id in draft_seq
-            ]
+            ],
         )
 
     dataframe["hero_features"] = dataframe["draft_sequence"].apply(
-        get_sequence_features
+        get_sequence_features,  # type: ignore[arg-type]
     )
     return dataframe

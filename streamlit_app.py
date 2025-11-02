@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import streamlit as st
 import torch
 
@@ -192,7 +193,7 @@ def evaluate_candidate(
 
     draft_tensor = torch.tensor([draft_ids], dtype=torch.long, device=device)
     hero_features_tensor = torch.tensor(
-        [hero_features],
+        np.array([hero_features]),
         dtype=torch.long,
         device=device,
     )
@@ -243,9 +244,9 @@ st.title("Dota Picker Web UI")
 model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
 
 if model_path.exists():
-    loaded_model = ModelTrainer.create_model(
-        HeroDataManager().get_heroes_number(),
-    )
+    loaded_model = ModelTrainer(
+        settings.PERSONAL_DOTA_MATCHES_PATH,
+    ).create_default_model()
     loaded_model.load_state_dict(torch.load(model_path))
     loaded_model.to(device)
     loaded_model.eval()
@@ -353,7 +354,7 @@ def calculate_baseline_probability(
         device=device,
     )
     hero_features_tensor = torch.tensor(
-        [hero_features],
+        np.array([hero_features]),
         dtype=torch.long,
         device=device,
     )

@@ -13,3 +13,4 @@ optimization_history.html
 optuna_trials.csv
 param_importances.html
 pareto_front.html
+prof.prof
