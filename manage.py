@@ -74,5 +74,13 @@ def load_personal_matches() -> None:
         click.echo(f"Error: {critical_error}")
 
 
+@cli.command()
+def train_from_tuning() -> None:
+    module = importlib.import_module(
+        "dota_hero_picker.train_from_tuning",
+    )
+    module.main()
+
+
 if __name__ == "__main__":
     cli()

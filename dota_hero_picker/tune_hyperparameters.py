@@ -36,46 +36,40 @@ def create_objective(
 
         embedding_dim = trial.suggest_categorical(
             "embedding_dim",
-            [8, 16, 32, 64, 128],
-        )
-        gru_hidden_dim = trial.suggest_categorical(
-            "gru_hidden_dim",
             [
-                8,
                 16,
                 32,
                 64,
                 128,
-                256,
             ],
         )
-        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 5)
+        gru_hidden_dim = trial.suggest_categorical(
+            "gru_hidden_dim",
+            [
+                32,
+                64,
+                128,
+            ],
+        )
+        num_gru_layers = trial.suggest_int("num_gru_layers", 3, 6)
         bidirectional = trial.suggest_categorical(
             "bidirectional",
             [True, False],
         )
 
-        dropout_rate = (
-            trial.suggest_float(
-                "dropout_rate",
-                0.2,
-                0.8,
-            )
-            if num_gru_layers > 1
-            else trial.suggest_float(
-                "dropout_rate",
-                0.1,
-                0.7,
-            )
+        dropout_rate = trial.suggest_float(
+            "dropout_rate",
+            0.25,
+            0.75,
         )
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            1,
+            5,
             20,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            scheduler_patience + 1,
+            scheduler_patience + 4,
             scheduler_patience + 14,
         )
 
@@ -102,10 +96,10 @@ def create_objective(
             else None,
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-5, 1e-1, log=True),
+                lr=trial.suggest_float("lr", 1e-4, 1e-1, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
-                    1e-8,
+                    1e-7,
                     0.1,
                     log=True,
                 ),
@@ -113,12 +107,12 @@ def create_objective(
             scheduler_parameters=SchedulerParameters(
                 factor=trial.suggest_float(
                     "factor",
-                    0.3,
-                    0.9,
+                    0.5,
+                    1,
                 ),
                 threshold=trial.suggest_float(
                     "threshold",
-                    0.00001,
+                    0.001,
                     1e1,
                     log=True,
                 ),
@@ -126,9 +120,9 @@ def create_objective(
             ),
             batch_size=trial.suggest_categorical(
                 "batch_size",
-                [8, 16, 32, 64, 128, 256, 512, 1024],
+                [128, 256, 512, 1024],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 5, 25),
+            decision_weight=trial.suggest_int("decision_weight", 7, 23),
         )
 
         model_trainer.setup_custom_training(model, training_arguments)
@@ -163,7 +157,8 @@ def main(csv_file_path: Path) -> None:
 
     study.optimize(
         objective,
-        n_trials=100,
+        # n_trials=1,
+        n_trials=500,
         show_progress_bar=True,
     )
     fig = optuna.visualization.plot_optimization_history(study)

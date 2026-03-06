@@ -33,9 +33,10 @@ logger = logging.getLogger(__name__)
 class ModelTrainer:
     """Class responsible for model training."""
 
+    hero_data_manager = HeroDataManager()
+
     def __init__(self, csv_file_path: Path, random_state: int = 42) -> None:
         self.random_state = random_state
-        self.hero_data_manager = HeroDataManager()
 
         self.data_manager = DataManager(
             csv_file_path,
@@ -69,15 +70,16 @@ class ModelTrainer:
             f"{count_trainable_params(self.model)}",
         )
 
-    def create_default_model(self) -> RNNWinPredictor:
+    @classmethod
+    def create_default_model(cls) -> RNNWinPredictor:
         return RNNWinPredictor(
             NNParameters(
-                num_heroes=self.hero_data_manager.get_heroes_number(),
-                embedding_dim=128,
-                gru_hidden_dim=8,
-                num_gru_layers=1,
-                dropout_rate=0.433040147239669,
-                bidirectional=False,
+                num_heroes=cls.hero_data_manager.get_heroes_number(),
+                embedding_dim=64,
+                gru_hidden_dim=64,
+                num_gru_layers=4,
+                dropout_rate=0.371066,
+                bidirectional=True,
             ),
         )
 
@@ -89,19 +91,19 @@ class ModelTrainer:
                 train_dataset=self.data_manager.train_dataset,
                 val_dataset=self.data_manager.val_dataset,
             ),
-            pos_weight=self.data_manager.pos_weight,
-            early_stopping_patience=30,
+            pos_weight=None,
+            early_stopping_patience=25,
             optimizer_parameters=OptimizerParameters(
-                lr=0.0372695612898765,
-                weight_decay=0.0282619707874099,
+                lr=0.044749,
+                weight_decay=0.000005,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.325895003163696,
-                scheduler_patience=20,
-                threshold=1.83931032095674,
+                factor=0.897508,
+                scheduler_patience=12,
+                threshold=0.060861,
             ),
-            decision_weight=23,
-            batch_size=16,
+            decision_weight=12,
+            batch_size=512,
         )
 
     def train_epoch(
