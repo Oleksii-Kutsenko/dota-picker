@@ -75,11 +75,11 @@ class ModelTrainer:
         return RNNWinPredictor(
             NNParameters(
                 num_heroes=cls.hero_data_manager.get_heroes_number(),
-                embedding_dim=64,
+                embedding_dim=128,
                 gru_hidden_dim=64,
-                num_gru_layers=4,
-                dropout_rate=0.371066,
-                bidirectional=True,
+                num_gru_layers=5,
+                dropout_rate=0.389805,
+                bidirectional=False,
             ),
         )
 

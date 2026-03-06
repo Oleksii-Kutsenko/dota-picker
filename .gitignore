@@ -14,3 +14,5 @@ optuna_trials.csv
 param_importances.html
 pareto_front.html
 prof.prof
+.venv
+.vscode
