@@ -27,18 +27,6 @@ def cli() -> None:
 
 
 @cli.command()
-def load_public_matches() -> None:
-    try:
-        module = importlib.import_module(
-            "dota_hero_picker.load_public_matches",
-        )
-        module.main(settings.ACCOUNT_ID, settings.PUBLIC_DOTA_MATCHES_PATH)
-    except DotaPickerError as critical_error:
-        logger.exception("Critical Error")
-        click.echo(f"Error: {critical_error}")
-
-
-@cli.command()
 def train_model() -> None:
     try:
         module = importlib.import_module("dota_hero_picker.model_trainer")
@@ -72,6 +60,14 @@ def load_personal_matches() -> None:
     except DotaPickerError as critical_error:
         logger.exception("Critical Error")
         click.echo(f"Error: {critical_error}")
+
+
+@cli.command()
+def train_from_tuning() -> None:
+    module = importlib.import_module(
+        "dota_hero_picker.train_from_tuning",
+    )
+    module.main()
 
 
 if __name__ == "__main__":
