@@ -8,10 +8,9 @@ from typing import Any, TypedDict
 
 import pandas as pd
 import requests
+from requests.exceptions import ReadTimeout
 
 from manage import DotaPickerError
-
-from .patch_resolver import resolve_patch_id
 
 HEROES_FILE = "heroes.json"
 API_MATCHES_ENDPOINT = "https://api.opendota.com/api/players/{}/matches"
@@ -37,7 +36,6 @@ def read_existing_matches(csv_path: str) -> tuple[set[int], int | None]:
     match_ids = set(existing_df["match_id"])
     max_start_time = existing_df["start_time"].max()
 
-    breakpoint()
     return match_ids, max_start_time
 
 
@@ -135,10 +133,6 @@ def parse_draft(match: MatchDict, account_id: int) -> dict[str, Any] | None:
         msg = "Picks parsing failed"
         raise RuntimeError(msg)
 
-    match_id = int(match.get("match_id", 0))
-    start_time = int(match.get("start_time", 0))
-    patch_id = resolve_patch_id(start_time)
-
     return {
         "team_picks": team_picks,
         "opponent_picks": opp_picks,
@@ -157,23 +151,26 @@ def fetch_match_details(
 ) -> list[dict[str, Any]]:
     detailed_decisions = []
     for match_id in match_ids:
-        response = requests.get(
-            API_MATCH_DETAILS_ENDPOINT.format(match_id),
-            timeout=5,
-        )
-        if response.status_code == HTTPStatus.OK:
-            match = response.json()
-            data = parse_draft(match, account_id)
-            if data:
-                detailed_decisions.append(data)
-            else:
-                logger.info(f"Match #{match['match_id']} failed to parse.")
-        else:
-            logger.info(
-                f"Failed to fetch details for match "
-                f"{match_id}: {response.status_code}",
+        try:
+            response = requests.get(
+                API_MATCH_DETAILS_ENDPOINT.format(match_id),
+                timeout=5,
             )
-        logger.info(f"Match #{match_id} has been processed")
+            if response.status_code == HTTPStatus.OK:
+                match = response.json()
+                data = parse_draft(match, account_id)
+                if data:
+                    detailed_decisions.append(data)
+                else:
+                    logger.info(f"Match #{match['match_id']} failed to parse.")
+            else:
+                logger.info(
+                    f"Failed to fetch details for match "
+                    f"{match_id}: {response.status_code}",
+                )
+            logger.info(f"Match #{match_id} has been processed")
+        except ReadTimeout:
+            break
 
         time.sleep(delay_seconds)
     return detailed_decisions
@@ -235,7 +232,9 @@ def fetch_and_save_new_decisions(
     data = response.json()
 
     new_match_ids = [
-        m["match_id"] for m in data if m["match_id"] not in existing_match_ids
+        match["match_id"]
+        for match in data
+        if match["match_id"] not in existing_match_ids
     ]
 
     if not new_match_ids:

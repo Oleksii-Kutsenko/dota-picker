@@ -51,9 +51,8 @@ def get_latest_patch_id() -> int:
     return entries[-1]["id"]
 
 
-def get_patch_vocab_size() -> int:
-    entries = load_patch_entries()
-    return max(entry["id"] for entry in entries) + 1
+def get_patches_number() -> int:
+    return len(load_patch_entries())
 
 
 def resolve_patch_id(start_time: int) -> int:
