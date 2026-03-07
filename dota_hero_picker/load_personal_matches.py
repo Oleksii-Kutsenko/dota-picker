@@ -129,6 +129,10 @@ def parse_draft(match: MatchDict, account_id: int) -> dict[str, Any] | None:
         your_team,
     )
 
+    if 0 in team_picks or 0 in opp_picks:
+        logger.info("Invalid hero IDs for match #%s", match["match_id"])
+        return None
+
     if len(team_picks) + len(opp_picks) != PICKS_NUMBER:
         msg = "Picks parsing failed"
         raise RuntimeError(msg)

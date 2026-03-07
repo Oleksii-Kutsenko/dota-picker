@@ -17,12 +17,16 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @st.cache_resource
-def get_model(model_path: Path) -> RNNWinPredictor:
-    loaded_model = ModelTrainer.create_default_model()
-    loaded_model.load_state_dict(torch.load(model_path, map_location=device))
-    loaded_model.to(device)
-    loaded_model.eval()
-    return loaded_model
+def get_model() -> RNNWinPredictor:
+    model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
+    st.success(f"Model loaded from {model_path}.")
+
+    model = ModelTrainer.create_default_model()
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+
+    return model
 
 
 @st.cache_resource
@@ -31,10 +35,8 @@ def get_hero_data_manager() -> HeroDataManager:
 
 
 hero_data_manager = get_hero_data_manager()
-model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
-loaded_model = get_model(model_path)
+loaded_model = get_model()
 latest_patch_id = get_latest_patch_id()
-st.success(f"Model loaded from {model_path}.")
 
 
 def build_draft_sequence(

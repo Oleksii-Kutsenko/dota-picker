@@ -77,7 +77,7 @@ class ModelTrainer:
             NNParameters(
                 num_heroes=cls.hero_data_manager.get_heroes_number(),
                 num_patches=get_patches_number(),
-                embedding_dim=128,
+                heroes_embedding_dim=128,
                 patch_embedding_dim=8,
                 gru_hidden_dim=64,
                 num_gru_layers=5,

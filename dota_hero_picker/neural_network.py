@@ -23,7 +23,7 @@ class NNParameters:
     bidirectional: bool
 
 
-class RNNWinPredictor(nn.Module):
+class RNNWinPredictor(nn.Module):  # pylint: disable=too-many-instance-attributes
     """Dota 2 match win predictor."""
 
     def __init__(
@@ -48,9 +48,8 @@ class RNNWinPredictor(nn.Module):
         self.num_gru_layers = nn_parameters.num_gru_layers
         self.bidirectional = nn_parameters.bidirectional
 
-        self.feature_dim = (
-            nn_parameters.heroes_embedding_dim
-            + len(HeroDataManager.FEATURES)
+        self.feature_dim = nn_parameters.heroes_embedding_dim + len(
+            HeroDataManager.FEATURES,
         )
         self.gru = nn.GRU(
             self.feature_dim,
@@ -91,7 +90,7 @@ class RNNWinPredictor(nn.Module):
         hero_features: torch.Tensor,
         patch_id: torch.Tensor,
     ) -> Any:
-        batch_size, sequence_length = draft_sequence.shape
+        batch_size, _ = draft_sequence.shape
 
         hero_embeds = self.hero_emb(draft_sequence)
 

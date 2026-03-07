@@ -10,7 +10,7 @@ from dota_hero_picker.neural_network import (
     NNParameters,
     RNNWinPredictor,
 )
-from dota_hero_picker.patch_resolver import get_patch_vocab_size
+from dota_hero_picker.patch_resolver import get_patches_number
 from dota_hero_picker.training_utils import (
     OptimizerParameters,
     SchedulerParameters,
@@ -41,9 +41,9 @@ def train_best_model(csv_file_path: Path) -> None:
     for _, row in trails_dataframe.iterrows():
         model_params = NNParameters(
             num_heroes=num_heroes,
-            num_patches=get_patch_vocab_size(),
-            embedding_dim=row["params_embedding_dim"],
-            patch_embedding_dim=8,
+            num_patches=get_patches_number(),
+            heroes_embedding_dim=row["params_heroes_embedding_dim"],
+            patch_embedding_dim=row["params_patch_embedding_dim"],
             gru_hidden_dim=row["params_gru_hidden_dim"],
             num_gru_layers=row["params_num_gru_layers"],
             dropout_rate=row["params_dropout_rate"],

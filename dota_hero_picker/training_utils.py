@@ -1,3 +1,4 @@
+import copy
 import logging
 from collections import Counter
 from collections.abc import Callable
@@ -180,7 +181,7 @@ class EarlyStopping:
         if self.best_val_loss is None:
             self.best_val_loss = score
             self.best_metrics = metrics
-            self.best_model_state = model.state_dict()
+            self.best_model_state = copy.deepcopy(model.state_dict())
         elif score < self.best_val_loss + self.delta:
             self.counter += 1
             if self.counter >= self.patience:
@@ -188,7 +189,7 @@ class EarlyStopping:
         else:
             self.best_val_loss = score
             self.best_metrics = metrics
-            self.best_model_state = model.state_dict()
+            self.best_model_state = copy.deepcopy(model.state_dict())
             self.counter = 0
 
     def load_best_model(self, model: RNNWinPredictor) -> None:
@@ -335,7 +336,11 @@ def calculate_metrics(
         zero_division=0,
     )
     recall = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0, average="macro")
+    f1 = f1_score(
+        y_true,
+        y_pred,
+        zero_division=0,
+    )
     auc = roc_auc_score(y_true, y_proba)
     cm = confusion_matrix(
         y_true,
