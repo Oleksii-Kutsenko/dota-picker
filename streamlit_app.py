@@ -11,12 +11,13 @@ from dota_hero_picker.data_preparation import (
 from dota_hero_picker.hero_data_manager import HeroDataManager, hero_positions
 from dota_hero_picker.model_trainer import ModelTrainer
 from dota_hero_picker.neural_network import RNNWinPredictor
+from dota_hero_picker.patch_resolver import get_latest_patch_id
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @st.cache_resource
-def get_model(model_path):
+def get_model(model_path: Path) -> RNNWinPredictor:
     loaded_model = ModelTrainer.create_default_model()
     loaded_model.load_state_dict(torch.load(model_path, map_location=device))
     loaded_model.to(device)
@@ -25,13 +26,14 @@ def get_model(model_path):
 
 
 @st.cache_resource
-def get_hero_data_manager():
+def get_hero_data_manager() -> HeroDataManager:
     return HeroDataManager()
 
 
 hero_data_manager = get_hero_data_manager()
 model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
 loaded_model = get_model(model_path)
+latest_patch_id = get_latest_patch_id()
 st.success(f"Model loaded from {model_path}.")
 
 
@@ -102,17 +104,31 @@ def suggest_best_picks(
     ]
 
     draft_tensor = torch.tensor(
-        batch_draft_ids, dtype=torch.long, device=device
+        batch_draft_ids,
+        dtype=torch.long,
+        device=device,
     )
     hero_features_tensor = torch.tensor(
-        np.array(batch_hero_features), dtype=torch.long, device=device
+        np.array(batch_hero_features),
+        dtype=torch.float,
+        device=device,
+    )
+    patch_ids_tensor = torch.full(
+        (len(batch_draft_ids),),
+        fill_value=latest_patch_id,
+        dtype=torch.long,
+        device=device,
     )
 
     with torch.no_grad():
-        logits = model(draft_tensor, hero_features_tensor)
+        logits = model(
+            draft_tensor,
+            hero_features_tensor,
+            patch_ids_tensor,
+        )
         probabilities = torch.sigmoid(logits).cpu().numpy().flatten()
 
-    results = list(zip(candidate_heroes, probabilities))
+    results = list(zip(candidate_heroes, probabilities, strict=False))
 
     results.sort(key=lambda x: x[1], reverse=True)
     return results[:top_n]
@@ -139,6 +155,11 @@ def calculate_baseline_probability(
     )
     hero_features_tensor = torch.tensor(
         np.array([hero_features]),
+        dtype=torch.float,
+        device=device,
+    )
+    patch_tensor = torch.tensor(
+        [latest_patch_id],
         dtype=torch.long,
         device=device,
     )
@@ -147,6 +168,7 @@ def calculate_baseline_probability(
         baseline_logits = model(
             baseline_tensor,
             hero_features_tensor,
+            patch_tensor,
         )
         return torch.sigmoid(baseline_logits).item()
 

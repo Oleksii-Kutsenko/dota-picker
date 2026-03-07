@@ -14,7 +14,9 @@ class NNParameters:
     """Parameters for the neural network."""
 
     num_heroes: int
+    num_patches: int
     embedding_dim: int
+    patch_embedding_dim: int
     gru_hidden_dim: int
     num_gru_layers: int
     dropout_rate: float
@@ -34,12 +36,18 @@ class RNNWinPredictor(nn.Module):
             nn_parameters.embedding_dim,
             padding_idx=0,
         )
+        self.patch_emb = nn.Embedding(
+            nn_parameters.num_patches,
+            nn_parameters.patch_embedding_dim,
+        )
         self.gru_hidden_dim = nn_parameters.gru_hidden_dim
         self.num_gru_layers = nn_parameters.num_gru_layers
         self.bidirectional = nn_parameters.bidirectional
 
         self.feature_dim = (
-            nn_parameters.embedding_dim + len(HeroDataManager.FEATURES)
+            nn_parameters.embedding_dim
+            + len(HeroDataManager.FEATURES)
+            + nn_parameters.patch_embedding_dim
         )
         self.gru = nn.GRU(
             self.feature_dim,
@@ -80,11 +88,21 @@ class RNNWinPredictor(nn.Module):
         self,
         draft_sequence: torch.Tensor,
         hero_features: torch.Tensor,
+        patch_id: torch.Tensor,
     ) -> Any:
-        batch_size, _ = draft_sequence.shape
+        batch_size, sequence_length = draft_sequence.shape
 
         hero_embeds = self.hero_emb(draft_sequence)
-        combined_input = torch.cat([hero_embeds, hero_features], dim=-1)
+        patch_embeddings = self.patch_emb(patch_id)
+        patch_embeddings = patch_embeddings.unsqueeze(1).expand(
+            -1,
+            sequence_length,
+            -1,
+        )
+        combined_input = torch.cat(
+            [hero_embeds, hero_features, patch_embeddings],
+            dim=-1,
+        )
         combined_input = self.dropout(combined_input)
 
         _, hidden = self.gru(combined_input)

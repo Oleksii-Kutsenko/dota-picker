@@ -39,6 +39,7 @@ TrainingExample = tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
 ]
 
 
@@ -64,6 +65,11 @@ class DotaDataset(Dataset[TrainingExample]):
             dtype=torch.float,
             device=device,
         )
+        self.patch_ids = torch.tensor(
+            dataframe["patch_id"].values,
+            dtype=torch.long,
+            device=device,
+        )
         self.is_my_decisions = torch.tensor(
             dataframe["is_my_decision"].values,
             dtype=torch.long,
@@ -79,6 +85,7 @@ class DotaDataset(Dataset[TrainingExample]):
         return (
             self.draft_sequences[idx],
             self.hero_features[idx],
+            self.patch_ids[idx],
             self.wins[idx],
             self.is_my_decisions[idx],
         )
@@ -141,9 +148,9 @@ def process_evaluation_batch(
     batch_data: TrainingExample,
     criterion: nn.BCEWithLogitsLoss,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    draft_sequence, hero_features, is_win, _ = batch_data
+    draft_sequence, hero_features, patch_id, is_win, _ = batch_data
 
-    outputs = model(draft_sequence, hero_features)
+    outputs = model(draft_sequence, hero_features, patch_id)
     per_sample_loss = criterion(outputs, is_win)
     loss = per_sample_loss.mean()
 
@@ -216,10 +223,12 @@ def process_training_batch(
     Process a single batch: forward pass, loss computation,
     and optimization step.
     """
-    draft_sequence, hero_features, is_win, is_my_decision = batch_data
+    draft_sequence, hero_features, patch_id, is_win, is_my_decision = (
+        batch_data
+    )
 
     training_components.optimizer.zero_grad(set_to_none=True)
-    outputs = model(draft_sequence, hero_features)
+    outputs = model(draft_sequence, hero_features, patch_id)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
     weights = torch.where(

@@ -1,5 +1,3 @@
-import csv
-import datetime
 import logging
 import sys
 import time
@@ -12,11 +10,12 @@ import requests
 
 from manage import DotaPickerError
 
+from .patch_resolver import resolve_patch_id
+
 HEROES_FILE = "heroes.json"
 API_MATCHES_ENDPOINT = "https://api.opendota.com/api/players/{}/matches"
 API_MATCH_DETAILS_ENDPOINT = "https://api.opendota.com/api/matches/{}"
 API_HEROES_ENDPOINT = "https://api.opendota.com/api/heroes"
-CURRENT_PATCH_START = datetime.datetime(2025, 8, 15, tzinfo=datetime.UTC)
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -30,19 +29,18 @@ logger = logging.getLogger(__name__)
 def read_existing_matches(csv_path: str) -> tuple[set[int], int | None]:
     if not Path(csv_path).exists():
         return set(), None
-    match_ids = set()
-    max_start_time = None
-    with Path(csv_path).open(
-        newline="",
-        encoding="utf-8",
-    ) as csvfile:
-        reader = csv.reader(csvfile)
-        next(reader, None)  # Skip header
-        for row in reader:
-            match_ids.add(int(row[-2]))
-            start_time = int(row[-1])
-            if max_start_time is None or start_time > max_start_time:
-                max_start_time = start_time
+    existing_df = pd.read_csv(csv_path)
+    if existing_df.empty:
+        return set(), None
+
+    match_ids = set(existing_df["match_id"].dropna().astype(int))
+
+    max_start_time: int | None
+    if existing_df["start_time"].dropna().empty:
+        max_start_time = None
+    else:
+        max_start_time = int(existing_df["start_time"].max())
+
     return match_ids, max_start_time
 
 
@@ -97,6 +95,8 @@ class MatchDict(TypedDict):
     players: list[dict[str, int]] | None
     picks_bans: list[dict[str, int]] | None
     radiant_win: int
+    match_id: int
+    start_time: int
 
 
 def parse_draft(match: MatchDict, account_id: int) -> dict[str, Any] | None:
@@ -137,13 +137,18 @@ def parse_draft(match: MatchDict, account_id: int) -> dict[str, Any] | None:
         msg = "Picks parsing failed"
         raise RuntimeError(msg)
 
+    match_id = int(match.get("match_id", 0))
+    start_time = int(match.get("start_time", 0))
+    patch_id = resolve_patch_id(start_time)
+
     return {
         "team_picks": team_picks,
         "opponent_picks": opp_picks,
         "picked_hero": your_hero_id,
         "win": win,
-        "match_id": match.get("match_id"),
-        "start_time": match.get("start_time", 0),
+        "match_id": match_id,
+        "start_time": start_time,
+        "patch_id": patch_id,
     }
 
 
@@ -188,8 +193,21 @@ def save_to_csv(csv_path: str, new_decisions: list[dict[str, Any]]) -> None:
                 "win",
                 "match_id",
                 "start_time",
+                "patch_id",
             ],
         )
+
+    if "patch_id" not in df_existing.columns and "start_time" in df_existing:
+        df_existing["patch_id"] = df_existing["start_time"].apply(
+            lambda start_time: resolve_patch_id(int(start_time)),
+        )
+    elif "patch_id" in df_existing.columns and "start_time" in df_existing:
+        missing_patch_ids = df_existing["patch_id"].isna()
+        if missing_patch_ids.any():
+            df_existing.loc[missing_patch_ids, "patch_id"] = df_existing.loc[
+                missing_patch_ids,
+                "start_time",
+            ].apply(lambda start_time: resolve_patch_id(int(start_time)))
 
     data_rows = [
         {
@@ -199,15 +217,19 @@ def save_to_csv(csv_path: str, new_decisions: list[dict[str, Any]]) -> None:
             "win": dec["win"],
             "match_id": dec["match_id"],
             "start_time": dec["start_time"],
+            "patch_id": dec["patch_id"],
         }
         for dec in new_decisions
     ]
     df_new = pd.DataFrame(data_rows)
 
-    # Append new data and drop duplicates
-    # (adjust subset if you want uniqueness on specific columns)
+    # Keep latest row by match_id so refreshed rows can fill missing columns.
     df_all = pd.concat([df_existing, df_new], ignore_index=True)
-    dropped_df_all = df_all.drop_duplicates()
+    dropped_df_all = df_all.drop_duplicates(
+        subset=["match_id"],
+        keep="last",
+    ).copy()
+    dropped_df_all["patch_id"] = dropped_df_all["patch_id"].astype(int)
 
     # Sort by start_time ascending
     sorted_df_all = dropped_df_all.sort_values(by="start_time")
@@ -224,14 +246,8 @@ def fetch_and_save_new_decisions(
 ) -> int:
     existing_match_ids, _ = read_existing_matches(personal_dota_matches_path)
 
-    params = {}
-    params["date"] = (
-        datetime.datetime.now(tz=datetime.UTC) - CURRENT_PATCH_START
-    ).days + 1
-
     response = requests.get(
         API_MATCHES_ENDPOINT.format(account_id),
-        params=params,
         timeout=5,
     )
     if response.status_code != HTTP_OK:
@@ -243,12 +259,10 @@ def fetch_and_save_new_decisions(
         m["match_id"]
         for m in data
         if m["match_id"] not in existing_match_ids
-        and datetime.datetime.fromtimestamp(m["start_time"], tz=datetime.UTC)
-        >= CURRENT_PATCH_START
     ]
 
     if not new_match_ids:
-        logger.info("No new current-patch matches.")
+        logger.info("No new matches.")
         return 0
 
     detailed = fetch_match_details(new_match_ids, account_id)

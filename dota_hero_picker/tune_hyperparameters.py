@@ -19,6 +19,7 @@ from .neural_network import (
     NNParameters,
     RNNWinPredictor,
 )
+from .patch_resolver import get_patch_vocab_size
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,9 @@ def create_objective(
 
         model_params = NNParameters(
             num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
+            num_patches=get_patch_vocab_size(),
             embedding_dim=embedding_dim,
+            patch_embedding_dim=8,
             gru_hidden_dim=gru_hidden_dim,
             num_gru_layers=num_gru_layers,
             dropout_rate=dropout_rate,
@@ -157,7 +160,6 @@ def main(csv_file_path: Path) -> None:
 
     study.optimize(
         objective,
-        # n_trials=1,
         n_trials=500,
         show_progress_bar=True,
     )
