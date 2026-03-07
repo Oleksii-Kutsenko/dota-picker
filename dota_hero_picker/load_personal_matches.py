@@ -2,6 +2,7 @@ import logging
 import sys
 import time
 from collections import defaultdict
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -33,14 +34,10 @@ def read_existing_matches(csv_path: str) -> tuple[set[int], int | None]:
     if existing_df.empty:
         return set(), None
 
-    match_ids = set(existing_df["match_id"].dropna().astype(int))
+    match_ids = set(existing_df["match_id"])
+    max_start_time = existing_df["start_time"].max()
 
-    max_start_time: int | None
-    if existing_df["start_time"].dropna().empty:
-        max_start_time = None
-    else:
-        max_start_time = int(existing_df["start_time"].max())
-
+    breakpoint()
     return match_ids, max_start_time
 
 
@@ -97,6 +94,7 @@ class MatchDict(TypedDict):
     radiant_win: int
     match_id: int
     start_time: int
+    patch: int
 
 
 def parse_draft(match: MatchDict, account_id: int) -> dict[str, Any] | None:
@@ -146,9 +144,9 @@ def parse_draft(match: MatchDict, account_id: int) -> dict[str, Any] | None:
         "opponent_picks": opp_picks,
         "picked_hero": your_hero_id,
         "win": win,
-        "match_id": match_id,
-        "start_time": start_time,
-        "patch_id": patch_id,
+        "match_id": match["match_id"],
+        "start_time": match["start_time"],
+        "patch_id": match["patch"],
     }
 
 
@@ -163,7 +161,7 @@ def fetch_match_details(
             API_MATCH_DETAILS_ENDPOINT.format(match_id),
             timeout=5,
         )
-        if response.status_code == HTTP_OK:
+        if response.status_code == HTTPStatus.OK:
             match = response.json()
             data = parse_draft(match, account_id)
             if data:
@@ -197,47 +195,28 @@ def save_to_csv(csv_path: str, new_decisions: list[dict[str, Any]]) -> None:
             ],
         )
 
-    if "patch_id" not in df_existing.columns and "start_time" in df_existing:
-        df_existing["patch_id"] = df_existing["start_time"].apply(
-            lambda start_time: resolve_patch_id(int(start_time)),
-        )
-    elif "patch_id" in df_existing.columns and "start_time" in df_existing:
-        missing_patch_ids = df_existing["patch_id"].isna()
-        if missing_patch_ids.any():
-            df_existing.loc[missing_patch_ids, "patch_id"] = df_existing.loc[
-                missing_patch_ids,
-                "start_time",
-            ].apply(lambda start_time: resolve_patch_id(int(start_time)))
-
     data_rows = [
         {
-            "team_picks": str(dec["team_picks"]),
-            "opponent_picks": str(dec["opponent_picks"]),
-            "picked_hero": dec["picked_hero"],
-            "win": dec["win"],
-            "match_id": dec["match_id"],
-            "start_time": dec["start_time"],
-            "patch_id": dec["patch_id"],
+            "team_picks": str(decision["team_picks"]),
+            "opponent_picks": str(decision["opponent_picks"]),
+            "picked_hero": decision["picked_hero"],
+            "win": decision["win"],
+            "match_id": decision["match_id"],
+            "start_time": decision["start_time"],
+            "patch_id": decision["patch_id"],
         }
-        for dec in new_decisions
+        for decision in new_decisions
     ]
     df_new = pd.DataFrame(data_rows)
 
-    # Keep latest row by match_id so refreshed rows can fill missing columns.
     df_all = pd.concat([df_existing, df_new], ignore_index=True)
     dropped_df_all = df_all.drop_duplicates(
         subset=["match_id"],
         keep="last",
     ).copy()
-    dropped_df_all["patch_id"] = dropped_df_all["patch_id"].astype(int)
 
-    # Sort by start_time ascending
     sorted_df_all = dropped_df_all.sort_values(by="start_time")
-
     sorted_df_all.to_csv(csv_path, index=False)
-
-
-HTTP_OK = 200
 
 
 def fetch_and_save_new_decisions(
@@ -250,15 +229,13 @@ def fetch_and_save_new_decisions(
         API_MATCHES_ENDPOINT.format(account_id),
         timeout=5,
     )
-    if response.status_code != HTTP_OK:
+    if response.status_code != HTTPStatus.OK:
         msg = f"API error: {response.status_code}"
         raise DotaPickerError(msg)
     data = response.json()
 
     new_match_ids = [
-        m["match_id"]
-        for m in data
-        if m["match_id"] not in existing_match_ids
+        m["match_id"] for m in data if m["match_id"] not in existing_match_ids
     ]
 
     if not new_match_ids:

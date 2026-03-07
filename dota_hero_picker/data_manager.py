@@ -12,7 +12,6 @@ from .data_preparation import (
     enrich_dataframe,
     prepare_dataframe,
 )
-from .patch_resolver import resolve_patch_id
 from .training_utils import (
     DotaDataset,
     compute_baseline_f1,
@@ -54,25 +53,6 @@ class DataManager:
                 "win": int,
                 "picked_hero": int,
             },
-        )
-        if "patch_id" not in matches_dataframe.columns:
-            matches_dataframe["patch_id"] = matches_dataframe[
-                "start_time"
-            ].apply(
-                lambda start_time: resolve_patch_id(int(start_time)),
-            )
-        else:
-            missing_patch_ids = matches_dataframe["patch_id"].isna()
-            if missing_patch_ids.any():
-                matches_dataframe.loc[missing_patch_ids, "patch_id"] = (
-                    matches_dataframe.loc[
-                        missing_patch_ids, "start_time",
-                    ].apply(
-                        lambda start_time: resolve_patch_id(int(start_time)),
-                    )
-                )
-        matches_dataframe["patch_id"] = matches_dataframe["patch_id"].astype(
-            int,
         )
         pick_columns = [
             "team_picks",
