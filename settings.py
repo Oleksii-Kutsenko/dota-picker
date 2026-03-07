@@ -21,3 +21,6 @@ ABILITIES_FILE = (
 HERO_ABILITIES_FILE = (
     Path("dota_hero_picker") / Path("constants") / Path("hero_abilities.json")
 )
+PATCHES_FILE = (
+    Path("dota_hero_picker") / Path("constants") / Path("patch.json")
+)

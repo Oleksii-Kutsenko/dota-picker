@@ -10,6 +10,7 @@ from dota_hero_picker.hero_data_manager import HeroDataManager
 
 from .data_manager import DataManager
 from .neural_network import NNParameters, RNNWinPredictor
+from .patch_resolver import get_patches_number
 from .training_utils import (
     EarlyStopping,
     MetricsResult,
@@ -75,7 +76,9 @@ class ModelTrainer:
         return RNNWinPredictor(
             NNParameters(
                 num_heroes=cls.hero_data_manager.get_heroes_number(),
-                embedding_dim=128,
+                num_patches=get_patches_number(),
+                heroes_embedding_dim=128,
+                patch_embedding_dim=8,
                 gru_hidden_dim=64,
                 num_gru_layers=5,
                 dropout_rate=0.389805,

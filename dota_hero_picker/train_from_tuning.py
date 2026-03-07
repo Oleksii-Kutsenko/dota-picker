@@ -10,6 +10,7 @@ from dota_hero_picker.neural_network import (
     NNParameters,
     RNNWinPredictor,
 )
+from dota_hero_picker.patch_resolver import get_patches_number
 from dota_hero_picker.training_utils import (
     OptimizerParameters,
     SchedulerParameters,
@@ -20,9 +21,9 @@ from dota_hero_picker.training_utils import (
 logger = logging.getLogger(__name__)
 
 
-def train_best_model(csv_file_path: Path):
+def train_best_model(csv_file_path: Path) -> None:
     """
-    Loads the best parameters from the Optuna study
+    Load the best parameters from the Optuna study
     and trains the final model.
     """
     logger.info("Connecting to Optuna study database...")
@@ -32,14 +33,17 @@ def train_best_model(csv_file_path: Path):
     )
 
     trails_dataframe = study.trials_dataframe().sort_values(
-        "value", ascending=False
+        "value",
+        ascending=False,
     )
     model_trainer = ModelTrainer(csv_file_path)
     num_heroes = model_trainer.hero_data_manager.get_heroes_number()
     for _, row in trails_dataframe.iterrows():
         model_params = NNParameters(
             num_heroes=num_heroes,
-            embedding_dim=row["params_embedding_dim"],
+            num_patches=get_patches_number(),
+            heroes_embedding_dim=row["params_heroes_embedding_dim"],
+            patch_embedding_dim=row["params_patch_embedding_dim"],
             gru_hidden_dim=row["params_gru_hidden_dim"],
             num_gru_layers=row["params_num_gru_layers"],
             dropout_rate=row["params_dropout_rate"],
@@ -54,9 +58,11 @@ def train_best_model(csv_file_path: Path):
                 train_dataset=model_trainer.data_manager.train_dataset,
                 val_dataset=model_trainer.data_manager.val_dataset,
             ),
-            pos_weight=model_trainer.data_manager.pos_weight
-            if use_pos_weight
-            else None,
+            pos_weight=(
+                model_trainer.data_manager.pos_weight
+                if use_pos_weight
+                else None
+            ),
             early_stopping_patience=row["params_early_stopping_patience"],
             optimizer_parameters=OptimizerParameters(
                 lr=row["params_lr"],
@@ -95,6 +101,6 @@ def train_best_model(csv_file_path: Path):
     logger.info(f"Successfully trained and saved best model to {save_path}")
 
 
-def main():
+def main() -> None:
     logging.basicConfig(level=logging.INFO)
     train_best_model(settings.PERSONAL_DOTA_MATCHES_PATH)

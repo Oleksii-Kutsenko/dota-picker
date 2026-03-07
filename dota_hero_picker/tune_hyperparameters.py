@@ -19,6 +19,7 @@ from .neural_network import (
     NNParameters,
     RNNWinPredictor,
 )
+from .patch_resolver import get_patches_number
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +35,24 @@ def create_objective(
             [False, True],
         )
 
-        embedding_dim = trial.suggest_categorical(
-            "embedding_dim",
+        heroes_embedding_dim = trial.suggest_categorical(
+            "heroes_embedding_dim",
             [
                 16,
                 32,
                 64,
                 128,
+            ],
+        )
+        patch_embedding_dim = trial.suggest_categorical(
+            "patch_embedding_dim",
+            [
+                1,
+                2,
+                4,
+                8,
+                16,
+                32,
             ],
         )
         gru_hidden_dim = trial.suggest_categorical(
@@ -75,7 +87,9 @@ def create_objective(
 
         model_params = NNParameters(
             num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
-            embedding_dim=embedding_dim,
+            num_patches=get_patches_number(),
+            heroes_embedding_dim=heroes_embedding_dim,
+            patch_embedding_dim=patch_embedding_dim,
             gru_hidden_dim=gru_hidden_dim,
             num_gru_layers=num_gru_layers,
             dropout_rate=dropout_rate,
@@ -157,7 +171,6 @@ def main(csv_file_path: Path) -> None:
 
     study.optimize(
         objective,
-        # n_trials=1,
         n_trials=500,
         show_progress_bar=True,
     )

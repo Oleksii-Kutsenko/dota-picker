@@ -1,5 +1,6 @@
 import json
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -15,8 +16,6 @@ from settings import (
     HERO_ABILITIES_FILE,
     HEROES_FILE,
 )
-
-from .load_personal_matches import HTTP_OK
 
 hero_positions = {
     "Troll Warlord": [1, 2],
@@ -198,7 +197,7 @@ class DataLoader:
         if Path(local_file).exists():
             return cls.load_hero_json(local_file)
         response = requests.get(endpoint, timeout=5)
-        if response.status_code != HTTP_OK:
+        if response.status_code != HTTPStatus.OK:
             msg = f"Failed to fetch heroes: {response.status_code}"
             raise DotaPickerError(
                 msg,
