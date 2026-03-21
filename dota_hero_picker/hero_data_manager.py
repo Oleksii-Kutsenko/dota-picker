@@ -228,8 +228,6 @@ class DataLoader:
 class HeroProcessor:
     """Processes raw hero data into structured format."""
 
-    STUN_NAME = "stun"
-
     def __init__(
         self,
         raw_heroes: dict[str, RawHeroData],
@@ -458,7 +456,6 @@ class HeroDataManager:
     """Class for the hero data interactions."""
 
     FEATURES = (
-        "hero_id",
         "attack_type",
         "base_health_regen",
         "base_mana",
@@ -494,9 +491,8 @@ class HeroDataManager:
         "Nuker",
         "Pusher",
         "Support",
+        "has_stun",
     )
-
-    STUN_NAME = "STUN"
 
     def __init__(self) -> None:
         loader = DataLoader()

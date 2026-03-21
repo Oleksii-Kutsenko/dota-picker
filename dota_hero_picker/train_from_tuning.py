@@ -32,10 +32,14 @@ def train_best_model(csv_file_path: Path) -> None:
         storage="sqlite:///optuna_study.db",
     )
 
-    trails_dataframe = study.trials_dataframe().sort_values(
+    trails_dataframe = study.trials_dataframe()
+    trails_dataframe = trails_dataframe.loc[
+        trails_dataframe["state"] == "COMPLETE"
+    ].sort_values(
         "value",
         ascending=False,
     )
+
     model_trainer = ModelTrainer(csv_file_path)
     num_heroes = model_trainer.hero_data_manager.get_heroes_number()
     for _, row in trails_dataframe.iterrows():

@@ -69,15 +69,11 @@ def build_draft_sequence(
     )
 
 
-def suggest_best_picks(
-    model: RNNWinPredictor,
+def create_candidates(
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],
-    top_n: int = 20,
-) -> list[tuple[str, float]]:
-    model.eval()
-
+) -> list[str]:
     candidate_heroes = []
     already_picked = set(team_picks) | set(opponent_picks)
     all_heroes = hero_data_manager.get_heroes_localized_names()
@@ -91,6 +87,23 @@ def suggest_best_picks(
             continue
 
         candidate_heroes.append(localized_name)
+    return candidate_heroes
+
+
+def suggest_best_picks(
+    model: RNNWinPredictor,
+    team_picks: list[str],
+    opponent_picks: list[str],
+    allowed_positions: list[int],
+    top_n: int = 20,
+) -> list[tuple[str, float]]:
+    model.eval()
+
+    candidate_heroes = create_candidates(
+        team_picks,
+        opponent_picks,
+        allowed_positions,
+    )
 
     batch_draft_ids = [
         build_draft_sequence(team_picks, opponent_picks, candidate)
@@ -112,13 +125,7 @@ def suggest_best_picks(
     )
     hero_features_tensor = torch.tensor(
         np.array(batch_hero_features),
-        dtype=torch.float,
-        device=device,
-    )
-    patch_ids_tensor = torch.full(
-        (len(batch_draft_ids),),
-        fill_value=latest_patch_id,
-        dtype=torch.long,
+        dtype=torch.float32,
         device=device,
     )
 
@@ -126,7 +133,12 @@ def suggest_best_picks(
         logits = model(
             draft_tensor,
             hero_features_tensor,
-            patch_ids_tensor,
+            torch.full(
+                (len(batch_draft_ids),),
+                fill_value=latest_patch_id,
+                dtype=torch.long,
+                device=device,
+            ),
         )
         probabilities = torch.sigmoid(logits).cpu().numpy().flatten()
 
@@ -157,7 +169,7 @@ def calculate_baseline_probability(
     )
     hero_features_tensor = torch.tensor(
         np.array([hero_features]),
-        dtype=torch.float,
+        dtype=torch.float32,
         device=device,
     )
     patch_tensor = torch.tensor(
