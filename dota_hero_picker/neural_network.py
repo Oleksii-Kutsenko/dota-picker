@@ -14,14 +14,16 @@ class NNParameters:
     """Parameters for the neural network."""
 
     num_heroes: int
-    embedding_dim: int
+    num_patches: int
+    heroes_embedding_dim: int
+    patch_embedding_dim: int
     gru_hidden_dim: int
     num_gru_layers: int
     dropout_rate: float
     bidirectional: bool
 
 
-class RNNWinPredictor(nn.Module):
+class RNNWinPredictor(nn.Module):  # pylint: disable=too-many-instance-attributes
     """Dota 2 match win predictor."""
 
     def __init__(
@@ -31,15 +33,23 @@ class RNNWinPredictor(nn.Module):
         super().__init__()
         self.hero_emb = nn.Embedding(
             nn_parameters.num_heroes + 1,
-            nn_parameters.embedding_dim,
+            nn_parameters.heroes_embedding_dim,
             padding_idx=0,
+        )
+        self.patch_emb = nn.Embedding(
+            nn_parameters.num_patches + 1,
+            nn_parameters.patch_embedding_dim,
+        )
+        self.patch_to_hero = nn.Linear(
+            nn_parameters.patch_embedding_dim,
+            nn_parameters.heroes_embedding_dim,
         )
         self.gru_hidden_dim = nn_parameters.gru_hidden_dim
         self.num_gru_layers = nn_parameters.num_gru_layers
         self.bidirectional = nn_parameters.bidirectional
 
-        self.feature_dim = (
-            nn_parameters.embedding_dim + len(HeroDataManager.FEATURES)
+        self.feature_dim = nn_parameters.heroes_embedding_dim + len(
+            HeroDataManager.FEATURES,
         )
         self.gru = nn.GRU(
             self.feature_dim,
@@ -67,8 +77,6 @@ class RNNWinPredictor(nn.Module):
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
-            elif isinstance(module, nn.Embedding):
-                nn.init.xavier_uniform_(module.weight)
             elif isinstance(module, nn.GRU):
                 for name, param in module.named_parameters():
                     if "weight" in name:
@@ -80,14 +88,22 @@ class RNNWinPredictor(nn.Module):
         self,
         draft_sequence: torch.Tensor,
         hero_features: torch.Tensor,
+        patch_id: torch.Tensor,
     ) -> Any:
         batch_size, _ = draft_sequence.shape
 
         hero_embeds = self.hero_emb(draft_sequence)
+
+        patch_embeddings = self.patch_emb(patch_id)
+        patch_shift = self.patch_to_hero(patch_embeddings)
+
+        hero_embeds = hero_embeds + patch_shift.unsqueeze(1)
+
         combined_input = torch.cat([hero_embeds, hero_features], dim=-1)
         combined_input = self.dropout(combined_input)
 
         _, hidden = self.gru(combined_input)
+
         if self.bidirectional:
             hidden = hidden.view(
                 self.num_gru_layers,

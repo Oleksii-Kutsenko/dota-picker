@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 
+import optuna
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
@@ -10,6 +11,7 @@ from dota_hero_picker.hero_data_manager import HeroDataManager
 
 from .data_manager import DataManager
 from .neural_network import NNParameters, RNNWinPredictor
+from .patch_resolver import get_patches_number
 from .training_utils import (
     EarlyStopping,
     MetricsResult,
@@ -75,10 +77,12 @@ class ModelTrainer:
         return RNNWinPredictor(
             NNParameters(
                 num_heroes=cls.hero_data_manager.get_heroes_number(),
-                embedding_dim=128,
-                gru_hidden_dim=64,
-                num_gru_layers=5,
-                dropout_rate=0.389805,
+                num_patches=get_patches_number(),
+                heroes_embedding_dim=32,
+                patch_embedding_dim=4,
+                gru_hidden_dim=128,
+                num_gru_layers=6,
+                dropout_rate=0.358994,
                 bidirectional=False,
             ),
         )
@@ -91,18 +95,18 @@ class ModelTrainer:
                 train_dataset=self.data_manager.train_dataset,
                 val_dataset=self.data_manager.val_dataset,
             ),
-            pos_weight=None,
-            early_stopping_patience=25,
+            pos_weight=self.data_manager.pos_weight,
+            early_stopping_patience=24,
             optimizer_parameters=OptimizerParameters(
-                lr=0.044749,
-                weight_decay=0.000005,
+                lr=0.000132,
+                weight_decay=0.007296,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.897508,
-                scheduler_patience=12,
-                threshold=0.060861,
+                factor=0.649042,
+                scheduler_patience=11,
+                threshold=0.831899,
             ),
-            decision_weight=12,
+            decision_weight=21,
             batch_size=512,
         )
 
@@ -111,19 +115,19 @@ class ModelTrainer:
         epoch: int,
         train_loader: DataLoader[TrainingExample],
         val_loader: DataLoader[TrainingExample],
-    ) -> None:
+    ) -> tuple[MetricsResult, MetricsResult]:
         assert self.training_arguments is not None
         assert self.training_components is not None
         assert self.model is not None
         logger.info(f"Epoch {epoch + 1}/{self.training_arguments.epochs}")
 
-        metrics, _ = train_step(
+        train_metrics, _ = train_step(
             self.model,
             train_loader,
             self.training_components,
             self.training_arguments.decision_weight,
         )
-        logger.info(metrics)
+        logger.info(train_metrics)
 
         val_metrics, _ = evaluate_model(
             self.model,
@@ -138,9 +142,11 @@ class ModelTrainer:
             val_metrics,
             self.model,
         )
+        return train_metrics, val_metrics
 
     def train_model(
         self,
+        trial: optuna.trial.Trial | None = None,
     ) -> None:
         assert self.model is not None
         assert self.training_arguments is not None
@@ -187,11 +193,23 @@ class ModelTrainer:
         )
 
         for epoch in range(self.training_arguments.epochs):
-            self.train_epoch(
+            _, val_metrics = self.train_epoch(
                 epoch,
                 train_loader,
                 val_loader,
             )
+
+            if trial is not None:
+                intermediate_value = float(val_metrics.auc)
+                trial.report(intermediate_value, step=epoch)
+
+                if trial.should_prune():
+                    msg = (
+                        f"Pruned at epoch {epoch + 1} "
+                        f"with auc={intermediate_value:.4f}"
+                    )
+                    raise optuna.TrialPruned(msg)
+
             if self.training_components.early_stopping.early_stop:
                 logger.info("Early stopping triggered.")
                 break

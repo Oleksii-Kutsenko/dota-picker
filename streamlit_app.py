@@ -11,28 +11,32 @@ from dota_hero_picker.data_preparation import (
 from dota_hero_picker.hero_data_manager import HeroDataManager, hero_positions
 from dota_hero_picker.model_trainer import ModelTrainer
 from dota_hero_picker.neural_network import RNNWinPredictor
+from dota_hero_picker.patch_resolver import get_latest_patch_id
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @st.cache_resource
-def get_model(model_path):
-    loaded_model = ModelTrainer.create_default_model()
-    loaded_model.load_state_dict(torch.load(model_path, map_location=device))
-    loaded_model.to(device)
-    loaded_model.eval()
-    return loaded_model
+def get_model() -> RNNWinPredictor:
+    model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
+    st.success(f"Model loaded from {model_path}.")
+
+    model = ModelTrainer.create_default_model()
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+
+    return model
 
 
 @st.cache_resource
-def get_hero_data_manager():
+def get_hero_data_manager() -> HeroDataManager:
     return HeroDataManager()
 
 
 hero_data_manager = get_hero_data_manager()
-model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
-loaded_model = get_model(model_path)
-st.success(f"Model loaded from {model_path}.")
+loaded_model = get_model()
+latest_patch_id = get_latest_patch_id()
 
 
 def build_draft_sequence(
@@ -65,15 +69,11 @@ def build_draft_sequence(
     )
 
 
-def suggest_best_picks(
-    model: RNNWinPredictor,
+def create_candidates(
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],
-    top_n: int = 20,
-) -> list[tuple[str, float]]:
-    model.eval()
-
+) -> list[str]:
     candidate_heroes = []
     already_picked = set(team_picks) | set(opponent_picks)
     all_heroes = hero_data_manager.get_heroes_localized_names()
@@ -87,6 +87,23 @@ def suggest_best_picks(
             continue
 
         candidate_heroes.append(localized_name)
+    return candidate_heroes
+
+
+def suggest_best_picks(
+    model: RNNWinPredictor,
+    team_picks: list[str],
+    opponent_picks: list[str],
+    allowed_positions: list[int],
+    top_n: int = 20,
+) -> list[tuple[str, float]]:
+    model.eval()
+
+    candidate_heroes = create_candidates(
+        team_picks,
+        opponent_picks,
+        allowed_positions,
+    )
 
     batch_draft_ids = [
         build_draft_sequence(team_picks, opponent_picks, candidate)
@@ -102,17 +119,30 @@ def suggest_best_picks(
     ]
 
     draft_tensor = torch.tensor(
-        batch_draft_ids, dtype=torch.long, device=device
+        batch_draft_ids,
+        dtype=torch.long,
+        device=device,
     )
     hero_features_tensor = torch.tensor(
-        np.array(batch_hero_features), dtype=torch.long, device=device
+        np.array(batch_hero_features),
+        dtype=torch.float32,
+        device=device,
     )
 
     with torch.no_grad():
-        logits = model(draft_tensor, hero_features_tensor)
+        logits = model(
+            draft_tensor,
+            hero_features_tensor,
+            torch.full(
+                (len(batch_draft_ids),),
+                fill_value=latest_patch_id,
+                dtype=torch.long,
+                device=device,
+            ),
+        )
         probabilities = torch.sigmoid(logits).cpu().numpy().flatten()
 
-    results = list(zip(candidate_heroes, probabilities))
+    results = list(zip(candidate_heroes, probabilities, strict=False))
 
     results.sort(key=lambda x: x[1], reverse=True)
     return results[:top_n]
@@ -139,6 +169,11 @@ def calculate_baseline_probability(
     )
     hero_features_tensor = torch.tensor(
         np.array([hero_features]),
+        dtype=torch.float32,
+        device=device,
+    )
+    patch_tensor = torch.tensor(
+        [latest_patch_id],
         dtype=torch.long,
         device=device,
     )
@@ -147,6 +182,7 @@ def calculate_baseline_probability(
         baseline_logits = model(
             baseline_tensor,
             hero_features_tensor,
+            patch_tensor,
         )
         return torch.sigmoid(baseline_logits).item()
 

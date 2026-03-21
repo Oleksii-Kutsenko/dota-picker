@@ -19,6 +19,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
         opp_picks = row.opponent_picks
         my_pick = row.picked_hero
         win = row.win
+        patch_id = row.patch_id
 
         draft_sequence = (
             team_picks[:2]
@@ -38,6 +39,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
                     "draft_sequence": padded_draft_sequence,
                     "win": win,
                     "is_my_decision": is_my_decision,
+                    "patch_id": patch_id,
                 },
             )
 
@@ -61,6 +63,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
                     "draft_sequence": padded_draft_sequence,
                     "win": win,
                     "is_my_decision": 0,
+                    "patch_id": patch_id,
                 },
             )
 
@@ -69,7 +72,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     dataframe = dataframe[
-        ["team_picks", "opponent_picks", "picked_hero", "win"]
+        ["team_picks", "opponent_picks", "picked_hero", "win", "patch_id"]
     ]
     prepared_rows = []
     for _, row in dataframe.iterrows():
@@ -91,6 +94,7 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
                 "draft_sequence": padded_draft_sequence,
                 "win": row.win,
                 "is_my_decision": 1,
+                "patch_id": row.patch_id,
             },
         )
 

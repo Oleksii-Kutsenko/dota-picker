@@ -19,6 +19,7 @@ from .neural_network import (
     NNParameters,
     RNNWinPredictor,
 )
+from .patch_resolver import get_patches_number
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +35,23 @@ def create_objective(
             [False, True],
         )
 
-        embedding_dim = trial.suggest_categorical(
-            "embedding_dim",
+        heroes_embedding_dim = trial.suggest_categorical(
+            "heroes_embedding_dim",
             [
                 16,
                 32,
                 64,
                 128,
+            ],
+        )
+        patch_embedding_dim = trial.suggest_categorical(
+            "patch_embedding_dim",
+            [
+                1,
+                2,
+                4,
+                8,
+                16,
             ],
         )
         gru_hidden_dim = trial.suggest_categorical(
@@ -60,7 +71,7 @@ def create_objective(
         dropout_rate = trial.suggest_float(
             "dropout_rate",
             0.25,
-            0.75,
+            0.65,
         )
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
@@ -75,7 +86,9 @@ def create_objective(
 
         model_params = NNParameters(
             num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
-            embedding_dim=embedding_dim,
+            num_patches=get_patches_number(),
+            heroes_embedding_dim=heroes_embedding_dim,
+            patch_embedding_dim=patch_embedding_dim,
             gru_hidden_dim=gru_hidden_dim,
             num_gru_layers=num_gru_layers,
             dropout_rate=dropout_rate,
@@ -96,10 +109,10 @@ def create_objective(
             else None,
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-4, 1e-1, log=True),
+                lr=trial.suggest_float("lr", 1e-4, 1e-2, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
-                    1e-7,
+                    1e-5,
                     0.1,
                     log=True,
                 ),
@@ -107,8 +120,8 @@ def create_objective(
             scheduler_parameters=SchedulerParameters(
                 factor=trial.suggest_float(
                     "factor",
-                    0.5,
-                    1,
+                    0.6,
+                    0.85,
                 ),
                 threshold=trial.suggest_float(
                     "threshold",
@@ -126,7 +139,9 @@ def create_objective(
         )
 
         model_trainer.setup_custom_training(model, training_arguments)
-        model_trainer.train_model()
+        model_trainer.train_model(
+            trial=trial,
+        )
 
         assert model_trainer.training_components is not None
         assert (
@@ -150,15 +165,21 @@ def main(csv_file_path: Path) -> None:
     study = optuna.create_study(
         study_name="dota_win_predictor",
         direction="maximize",
-        sampler=optuna.samplers.TPESampler(),
+        sampler=optuna.samplers.TPESampler(
+            multivariate=True,
+        ),
+        pruner=optuna.pruners.HyperbandPruner(
+            min_resource=8,
+            max_resource=75,
+            reduction_factor=3,
+        ),
         storage="sqlite:///optuna_study.db",
         load_if_exists=True,
     )
 
     study.optimize(
         objective,
-        # n_trials=1,
-        n_trials=500,
+        n_trials=1,
         show_progress_bar=True,
     )
     fig = optuna.visualization.plot_optimization_history(study)
