@@ -38,6 +38,7 @@ def create_objective(
         heroes_embedding_dim = trial.suggest_categorical(
             "heroes_embedding_dim",
             [
+                8,
                 16,
                 32,
                 64,
@@ -46,23 +47,20 @@ def create_objective(
         )
         patch_embedding_dim = trial.suggest_categorical(
             "patch_embedding_dim",
-            [
-                1,
-                2,
-                4,
-                8,
-                16,
-            ],
+            [1, 2, 4, 8, 16, 32],
         )
         gru_hidden_dim = trial.suggest_categorical(
             "gru_hidden_dim",
             [
+                16,
                 32,
                 64,
                 128,
+                256,
+                512,
             ],
         )
-        num_gru_layers = trial.suggest_int("num_gru_layers", 3, 6)
+        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 4)
         bidirectional = trial.suggest_categorical(
             "bidirectional",
             [True, False],
@@ -70,19 +68,20 @@ def create_objective(
 
         dropout_rate = trial.suggest_float(
             "dropout_rate",
-            0.25,
+            0.3,
             0.65,
         )
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            5,
-            20,
+            4,
+            19,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            scheduler_patience + 4,
-            scheduler_patience + 14,
+            13,
+            26,
         )
+        num_heads = trial.suggest_categorical("num_heads", [1, 2, 4, 8])
 
         model_params = NNParameters(
             num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
@@ -93,6 +92,7 @@ def create_objective(
             num_gru_layers=num_gru_layers,
             dropout_rate=dropout_rate,
             bidirectional=bidirectional,
+            num_heads=num_heads,
         )
         model = RNNWinPredictor(model_params)
 
@@ -109,11 +109,11 @@ def create_objective(
             else None,
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-4, 1e-2, log=True),
+                lr=trial.suggest_float("lr", 1e-5, 1e-1, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
-                    1e-5,
-                    0.1,
+                    1e-7,
+                    1e-1,
                     log=True,
                 ),
             ),
@@ -121,21 +121,28 @@ def create_objective(
                 factor=trial.suggest_float(
                     "factor",
                     0.6,
-                    0.85,
+                    0.9,
                 ),
                 threshold=trial.suggest_float(
                     "threshold",
-                    0.001,
-                    1e1,
+                    1e-4,
+                    1e2,
                     log=True,
                 ),
                 scheduler_patience=scheduler_patience,
             ),
             batch_size=trial.suggest_categorical(
                 "batch_size",
-                [128, 256, 512, 1024],
+                [
+                    32,
+                    64,
+                    128,
+                    256,
+                    512,
+                    1024,
+                ],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 7, 23),
+            decision_weight=trial.suggest_int("decision_weight", 8, 21),
         )
 
         model_trainer.setup_custom_training(model, training_arguments)
@@ -163,7 +170,7 @@ def main(csv_file_path: Path) -> None:
     objective = create_objective(model_trainer)
 
     study = optuna.create_study(
-        study_name="dota_win_predictor",
+        study_name="dota_win_predictor_26_08_2026",
         direction="maximize",
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
@@ -179,7 +186,7 @@ def main(csv_file_path: Path) -> None:
 
     study.optimize(
         objective,
-        n_trials=1,
+        n_trials=60,
         show_progress_bar=True,
     )
     fig = optuna.visualization.plot_optimization_history(study)

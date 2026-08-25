@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 from torch import nn
@@ -21,20 +20,31 @@ class NNParameters:
     num_gru_layers: int
     dropout_rate: float
     bidirectional: bool
+    num_heads: int
 
 
-class RNNWinPredictor(nn.Module):  # pylint: disable=too-many-instance-attributes
-    """Dota 2 match win predictor."""
+class RNNWinPredictor(nn.Module):
+    """Dota 2 match win predictor with Attention and GRU."""
 
-    def __init__(
-        self,
-        nn_parameters: NNParameters,
-    ) -> None:
+    draft_team_ids: torch.Tensor
+
+    def __init__(self, nn_parameters: NNParameters) -> None:
         super().__init__()
+
+        # --- 1. Embeddings ---
         self.hero_emb = nn.Embedding(
             nn_parameters.num_heroes + 1,
             nn_parameters.heroes_embedding_dim,
             padding_idx=0,
+        )
+        self.team_emb = nn.Embedding(
+            3,  # 0: padding, 1: ally, 2: enemy
+            nn_parameters.heroes_embedding_dim,
+            padding_idx=0,
+        )
+        self.register_buffer(
+            "draft_team_ids",
+            torch.tensor([1, 1, 2, 2, 1, 1, 2, 2, 1], dtype=torch.long),
         )
         self.patch_emb = nn.Embedding(
             nn_parameters.num_patches + 1,
@@ -44,30 +54,33 @@ class RNNWinPredictor(nn.Module):  # pylint: disable=too-many-instance-attribute
             nn_parameters.patch_embedding_dim,
             nn_parameters.heroes_embedding_dim,
         )
-        self.gru_hidden_dim = nn_parameters.gru_hidden_dim
-        self.num_gru_layers = nn_parameters.num_gru_layers
-        self.bidirectional = nn_parameters.bidirectional
 
+        # --- 2. Encoders (Attention + GRU) ---
         self.feature_dim = nn_parameters.heroes_embedding_dim + len(
             HeroDataManager.FEATURES,
+        )
+        self.attention = nn.MultiheadAttention(
+            embed_dim=nn_parameters.heroes_embedding_dim,
+            num_heads=nn_parameters.num_heads,
+            dropout=nn_parameters.dropout_rate,
+            batch_first=True,
         )
         self.gru = nn.GRU(
             self.feature_dim,
             nn_parameters.gru_hidden_dim,
             num_layers=nn_parameters.num_gru_layers,
             batch_first=True,
-            bidirectional=self.bidirectional,
+            bidirectional=nn_parameters.bidirectional,
             dropout=nn_parameters.dropout_rate
             if nn_parameters.num_gru_layers > 1
             else 0,
         )
 
+        # --- 3. Regularization & Head ---
         self.dropout = nn.Dropout(nn_parameters.dropout_rate)
-
         gru_output_dim = nn_parameters.gru_hidden_dim * (
-            2 if self.bidirectional else 1
+            2 if nn_parameters.bidirectional else 1
         )
-
         self.output = nn.Linear(gru_output_dim, 1)
 
         self._initialize_weights()
@@ -76,7 +89,12 @@ class RNNWinPredictor(nn.Module):  # pylint: disable=too-many-instance-attribute
         """Initialize weights for layers."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
+                if module is self.output:
+                    nn.init.xavier_uniform_(module.weight)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                else:
+                    nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
             elif isinstance(module, nn.GRU):
                 for name, param in module.named_parameters():
                     if "weight" in name:
@@ -84,36 +102,77 @@ class RNNWinPredictor(nn.Module):  # pylint: disable=too-many-instance-attribute
                     elif "bias" in name:
                         nn.init.zeros_(param)
 
+    def _prepare_inputs(
+        self,
+        draft_sequence: torch.Tensor,
+        patch_id: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Combine hero, team, patch embeddings, and tabular hero features."""
+        batch_size, _ = draft_sequence.shape
+
+        mask = (draft_sequence != 0).unsqueeze(-1).float()
+        lengths = (draft_sequence != 0).sum(dim=1).clamp(min=1)
+
+        hero_embeds = self.hero_emb(draft_sequence)
+        team_ids = torch.where(
+            draft_sequence != 0,
+            self.draft_team_ids.unsqueeze(0).expand(batch_size, -1),
+            0,
+        )
+        team_embeds = self.team_emb(team_ids)
+        patch_shift = self.patch_to_hero(self.patch_emb(patch_id)).unsqueeze(1)
+
+        fused_hero_vecs = hero_embeds + team_embeds + (patch_shift * mask)
+
+        return fused_hero_vecs, mask, lengths
+
+    def _apply_attention(
+        self,
+        x: torch.Tensor,
+        draft_sequence: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply self-attention across the draft for pairwise synergy & counters."""
+        padding_mask = draft_sequence == 0
+        attn_out, _ = self.attention(
+            query=x,
+            key=x,
+            value=x,
+            key_padding_mask=padding_mask,
+        )
+        return self.dropout(x + attn_out) * mask
+
+    def _extract_last_valid_state(
+        self,
+        gru_out: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """Extract GRU hidden representation at the last actual drafted hero index."""
+        last_step_indices = (
+            (lengths - 1).view(-1, 1, 1).expand(-1, 1, gru_out.size(-1))
+        )
+        return gru_out.gather(1, last_step_indices).squeeze(1)
+
     def forward(
         self,
         draft_sequence: torch.Tensor,
         hero_features: torch.Tensor,
         patch_id: torch.Tensor,
-    ) -> Any:
-        batch_size, _ = draft_sequence.shape
+    ) -> torch.Tensor:
+        """Forward pass predicting win probability."""
+        # 1. Embed and combine features
+        fused_hero_vecs, mask, lengths = self._prepare_inputs(
+            draft_sequence,
+            patch_id,
+        )
 
-        hero_embeds = self.hero_emb(draft_sequence)
+        # 2. Pairwise Synergy & Counter Attention
+        attn_out = self._apply_attention(fused_hero_vecs, draft_sequence, mask)
 
-        patch_embeddings = self.patch_emb(patch_id)
-        patch_shift = self.patch_to_hero(patch_embeddings)
+        combined_input = torch.cat([attn_out, hero_features], dim=-1)
 
-        hero_embeds = hero_embeds + patch_shift.unsqueeze(1)
+        gru_out, _ = self.gru(combined_input)
+        final_hidden = self._extract_last_valid_state(gru_out, lengths)
 
-        combined_input = torch.cat([hero_embeds, hero_features], dim=-1)
-        combined_input = self.dropout(combined_input)
-
-        _, hidden = self.gru(combined_input)
-
-        if self.bidirectional:
-            hidden = hidden.view(
-                self.num_gru_layers,
-                2,
-                batch_size,
-                self.gru_hidden_dim,
-            )
-            last_layer = hidden[-1]
-            final_hidden = torch.cat([last_layer[0], last_layer[1]], dim=-1)
-        else:
-            final_hidden = hidden[-1]
-
+        # 5. Classify win logit
         return self.output(final_hidden).squeeze(-1)

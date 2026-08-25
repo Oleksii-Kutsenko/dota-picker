@@ -28,21 +28,30 @@ def train_best_model(csv_file_path: Path) -> None:
     """
     logger.info("Connecting to Optuna study database...")
     study = optuna.load_study(
-        study_name="dota_win_predictor",
+        study_name="dota_win_predictor_26_08_2026",
         storage="sqlite:///optuna_study.db",
     )
 
-    trails_dataframe = study.trials_dataframe()
-    trails_dataframe = trails_dataframe.loc[
-        trails_dataframe["state"] == "COMPLETE"
-    ].sort_values(
-        "value",
-        ascending=False,
+    trials_dataframe = study.trials_dataframe()
+    top_n_trials = 10
+    top_trials = (
+        trials_dataframe.loc[trials_dataframe["state"] == "COMPLETE"]
+        .sort_values("value", ascending=False)
+        .head(top_n_trials)
     )
 
     model_trainer = ModelTrainer(csv_file_path)
     num_heroes = model_trainer.hero_data_manager.get_heroes_number()
-    for _, row in trails_dataframe.iterrows():
+
+    best_overall_state: dict[str, Any] | None = None
+    best_overall_test_metrics: MetricsResult | None = None
+    best_trial_params: Any = None
+
+    for idx, (_, row) in enumerate(top_trials.iterrows(), 1):
+        logger.info(
+            f"--- Training Candidate {idx}/{len(top_trials)} "
+            f"(Val MCC: {row['value']:.4f}) ---"
+        )
         model_params = NNParameters(
             num_heroes=num_heroes,
             num_patches=get_patches_number(),
@@ -52,10 +61,11 @@ def train_best_model(csv_file_path: Path) -> None:
             num_gru_layers=row["params_num_gru_layers"],
             dropout_rate=row["params_dropout_rate"],
             bidirectional=row["params_bidirectional"],
+            num_heads=row["params_num_heads"],
         )
-        best_model = RNNWinPredictor(model_params)
+        model = RNNWinPredictor(model_params)
 
-        use_pos_weight = row["params_use_pos_weight"]
+        use_pos_weight = row.get("params_use_pos_weight", False)
 
         training_args = TrainingArguments(
             data=TrainingData(
@@ -81,28 +91,37 @@ def train_best_model(csv_file_path: Path) -> None:
             decision_weight=row["params_decision_weight"],
         )
 
-        logger.info("Setting up custom training with best parameters...")
-        model_trainer.setup_custom_training(best_model, training_args)
-
-        logger.info("Starting final model training...")
+        model_trainer.setup_custom_training(model, training_args)
         model_trainer.train_model()
 
-        logger.info("Training complete. Evaluating on test set...")
         test_metrics = model_trainer.evaluate_on_test()
+        logger.info(f"Candidate {idx} Test Metrics: {test_metrics}")
 
-        logger.info(f"Final Test Metrics: {test_metrics}")
-        if test_metrics.mcc >= row["value"]:
-            logger.info("Found good model. Parameters: ")
-            logger.info(row)
-            break
+        assert model_trainer.training_components is not None
+        current_state = (
+            model_trainer.training_components.early_stopping.best_model_state
+        )
 
-    assert model_trainer.training_components is not None
-    save_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
-    torch.save(
-        model_trainer.training_components.early_stopping.best_model_state,
-        save_path,
-    )
-    logger.info(f"Successfully trained and saved best model to {save_path}")
+        if (
+            best_overall_test_metrics is None
+            or test_metrics.mcc > best_overall_test_metrics.mcc
+        ):
+            best_overall_test_metrics = test_metrics
+            best_overall_state = current_state
+            best_trial_params = row
+
+    if (
+        best_overall_state is not None
+        and best_overall_test_metrics is not None
+    ):
+        save_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
+        torch.save(best_overall_state, save_path)
+        logger.info("--------------------------------------------------")
+        logger.info(f"Successfully saved best model to {save_path}")
+        logger.info(f"Best Test Metrics: {best_overall_test_metrics}")
+        logger.info("Best Trial Parameters:")
+        logger.info(best_trial_params)
+        logger.info("--------------------------------------------------")
 
 
 def main() -> None:

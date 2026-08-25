@@ -237,7 +237,7 @@ def process_training_batch(
         decision_weight,
         1.0,
     )
-    loss = (per_sample_loss * weights).mean()
+    loss = (per_sample_loss * weights).sum() / weights.sum()
 
     loss.backward()
     training_components.optimizer.step()
