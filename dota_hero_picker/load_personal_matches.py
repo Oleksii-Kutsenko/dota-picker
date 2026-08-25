@@ -158,7 +158,7 @@ def fetch_match_details(
         try:
             response = requests.get(
                 API_MATCH_DETAILS_ENDPOINT.format(match_id),
-                timeout=5,
+                timeout=10,
             )
             if response.status_code == HTTPStatus.OK:
                 match = response.json()

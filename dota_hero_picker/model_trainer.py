@@ -78,12 +78,13 @@ class ModelTrainer:
             NNParameters(
                 num_heroes=cls.hero_data_manager.get_heroes_number(),
                 num_patches=get_patches_number(),
-                heroes_embedding_dim=32,
-                patch_embedding_dim=4,
-                gru_hidden_dim=128,
-                num_gru_layers=6,
-                dropout_rate=0.358994,
+                heroes_embedding_dim=16,
+                patch_embedding_dim=8,
+                gru_hidden_dim=32,
+                num_gru_layers=2,
+                dropout_rate=0.382757,
                 bidirectional=False,
+                num_heads=1,
             ),
         )
 
@@ -96,18 +97,18 @@ class ModelTrainer:
                 val_dataset=self.data_manager.val_dataset,
             ),
             pos_weight=self.data_manager.pos_weight,
-            early_stopping_patience=24,
+            early_stopping_patience=27,
             optimizer_parameters=OptimizerParameters(
-                lr=0.000132,
-                weight_decay=0.007296,
+                lr=0.000255,
+                weight_decay=0.000095,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.649042,
-                scheduler_patience=11,
-                threshold=0.831899,
+                factor=0.620292,
+                scheduler_patience=16,
+                threshold=0.001181,
             ),
-            decision_weight=21,
-            batch_size=512,
+            decision_weight=9,
+            batch_size=128,
         )
 
     def train_epoch(
@@ -200,13 +201,13 @@ class ModelTrainer:
             )
 
             if trial is not None:
-                intermediate_value = float(val_metrics.auc)
+                intermediate_value = float(val_metrics.mcc)
                 trial.report(intermediate_value, step=epoch)
 
                 if trial.should_prune():
                     msg = (
                         f"Pruned at epoch {epoch + 1} "
-                        f"with auc={intermediate_value:.4f}"
+                        f"with mcc={intermediate_value:.4f}"
                     )
                     raise optuna.TrialPruned(msg)
 
