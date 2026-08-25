@@ -186,7 +186,7 @@ def main(csv_file_path: Path) -> None:
 
     study.optimize(
         objective,
-        n_trials=60,
+        n_trials=250,
         show_progress_bar=True,
     )
     fig = optuna.visualization.plot_optimization_history(study)

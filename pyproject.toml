@@ -26,6 +26,7 @@ dependencies = [
   "streamlit (==1.62.0)",
   "torch (==2.13.0)",
   "requests (==2.34.2)",
+  "optuna-dashboard (==0.20.0)",
 ]
 
 [dependency-groups]
