@@ -1,7 +1,9 @@
 import logging
 from pathlib import Path
+from typing import Any
 
 import optuna
+import pandas as pd
 import torch
 
 import settings
@@ -9,9 +11,12 @@ from dota_hero_picker.model_trainer import ModelTrainer
 from dota_hero_picker.neural_network import (
     NNParameters,
     RNNWinPredictor,
+    SiameseDraftPredictor,
+    SiameseParameters,
 )
 from dota_hero_picker.patch_resolver import get_patches_number
 from dota_hero_picker.training_utils import (
+    MetricsResult,
     OptimizerParameters,
     SchedulerParameters,
     TrainingArguments,
@@ -52,18 +57,30 @@ def train_best_model(csv_file_path: Path) -> None:
             f"--- Training Candidate {idx}/{len(top_trials)} "
             f"(Val MCC: {row['value']:.4f}) ---"
         )
-        model_params = NNParameters(
-            num_heroes=num_heroes,
-            num_patches=get_patches_number(),
-            heroes_embedding_dim=row["params_heroes_embedding_dim"],
-            patch_embedding_dim=row["params_patch_embedding_dim"],
-            gru_hidden_dim=row["params_gru_hidden_dim"],
-            num_gru_layers=row["params_num_gru_layers"],
-            dropout_rate=row["params_dropout_rate"],
-            bidirectional=row["params_bidirectional"],
-            num_heads=row["params_num_heads"],
-        )
-        model = RNNWinPredictor(model_params)
+        if "params_d_model" in row and not pd.isna(row["params_d_model"]):
+            model_params = SiameseParameters(
+                num_heroes=num_heroes,
+                num_patches=get_patches_number(),
+                d_model=int(row["params_d_model"]),
+                num_heads=int(row["params_num_heads"]),
+                num_synergy_layers=int(row["params_num_synergy_layers"]),
+                dropout_rate=float(row["params_dropout_rate"]),
+                patch_embedding_dim=int(row["params_patch_embedding_dim"]),
+            )
+            model: torch.nn.Module = SiameseDraftPredictor(model_params)
+        else:
+            legacy_params = NNParameters(
+                num_heroes=num_heroes,
+                num_patches=get_patches_number(),
+                heroes_embedding_dim=int(row["params_heroes_embedding_dim"]),
+                patch_embedding_dim=int(row["params_patch_embedding_dim"]),
+                gru_hidden_dim=int(row["params_gru_hidden_dim"]),
+                num_gru_layers=int(row["params_num_gru_layers"]),
+                dropout_rate=float(row["params_dropout_rate"]),
+                bidirectional=bool(row["params_bidirectional"]),
+                num_heads=int(row["params_num_heads"]),
+            )
+            model = RNNWinPredictor(legacy_params)
 
         use_pos_weight = row.get("params_use_pos_weight", False)
 

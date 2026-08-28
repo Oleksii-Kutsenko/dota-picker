@@ -18,6 +18,8 @@ from .model_trainer import ModelTrainer
 from .neural_network import (
     NNParameters,
     RNNWinPredictor,
+    SiameseDraftPredictor,
+    SiameseParameters,
 )
 from .patch_resolver import get_patches_number
 
@@ -35,43 +37,24 @@ def create_objective(
             [False, True],
         )
 
-        heroes_embedding_dim = trial.suggest_categorical(
-            "heroes_embedding_dim",
-            [
-                4,
-                8,
-                16,
-                32,
-                64,
-            ],
+        d_model = trial.suggest_categorical(
+            "d_model",
+            [16, 32, 64, 128],
+        )
+        valid_heads = [h for h in [1, 2, 4, 8] if d_model % h == 0]
+        num_heads = trial.suggest_categorical("num_heads", valid_heads)
+
+        num_synergy_layers = trial.suggest_int("num_synergy_layers", 1, 3)
+        dropout_rate = trial.suggest_float(
+            "dropout_rate",
+            0.15,
+            0.55,
         )
         patch_embedding_dim = trial.suggest_categorical(
             "patch_embedding_dim",
-            [1, 2, 4, 8, 16, 32],
-        )
-        gru_hidden_dim = trial.suggest_categorical(
-            "gru_hidden_dim",
-            [
-                16,
-                32,
-                64,
-                128,
-                256,
-                512,
-                1024,
-            ],
-        )
-        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 4)
-        bidirectional = trial.suggest_categorical(
-            "bidirectional",
-            [True, False],
+            [1, 2, 4, 8, 16],
         )
 
-        dropout_rate = trial.suggest_float(
-            "dropout_rate",
-            0.3,
-            0.65,
-        )
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
             4,
@@ -80,22 +63,19 @@ def create_objective(
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
             12,
-            26,
+            28,
         )
-        num_heads = trial.suggest_categorical("num_heads", [1, 2, 4, 8, 16])
 
-        model_params = NNParameters(
+        model_params = SiameseParameters(
             num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
             num_patches=get_patches_number(),
-            heroes_embedding_dim=heroes_embedding_dim,
-            patch_embedding_dim=patch_embedding_dim,
-            gru_hidden_dim=gru_hidden_dim,
-            num_gru_layers=num_gru_layers,
-            dropout_rate=dropout_rate,
-            bidirectional=bidirectional,
+            d_model=d_model,
             num_heads=num_heads,
+            num_synergy_layers=num_synergy_layers,
+            dropout_rate=dropout_rate,
+            patch_embedding_dim=patch_embedding_dim,
         )
-        model = RNNWinPredictor(model_params)
+        model = SiameseDraftPredictor(model_params)
 
         trainable_params = count_trainable_params(model)
         trial.set_user_attr("model_trainable_params", trainable_params)
@@ -171,7 +151,7 @@ def main(csv_file_path: Path) -> None:
     objective = create_objective(model_trainer)
 
     study = optuna.create_study(
-        study_name="dota_win_predictor_26_08_2026",
+        study_name="dota_win_predictor_28_08_2026",
         direction="maximize",
         sampler=optuna.samplers.TPESampler(
             multivariate=True,

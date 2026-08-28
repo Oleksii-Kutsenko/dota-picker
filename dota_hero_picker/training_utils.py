@@ -21,8 +21,6 @@ from sklearn.metrics import (
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
 
-from .neural_network import RNNWinPredictor
-
 logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,7 +28,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MID_POINT = 0.5
 
 
-def count_trainable_params(model: RNNWinPredictor) -> int:
+def count_trainable_params(model: nn.Module) -> int:
     """Count the number of trainable parameters in a PyTorch model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -145,7 +143,7 @@ class MetricsResult:
 
 
 def process_evaluation_batch(
-    model: RNNWinPredictor,
+    model: nn.Module,
     batch_data: TrainingExample,
     criterion: nn.BCEWithLogitsLoss,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -174,7 +172,7 @@ class EarlyStopping:
         self,
         val_loss: float,
         metrics: MetricsResult,
-        model: RNNWinPredictor,
+        model: nn.Module,
     ) -> None:
         score = -val_loss
 
@@ -192,7 +190,7 @@ class EarlyStopping:
             self.best_model_state = copy.deepcopy(model.state_dict())
             self.counter = 0
 
-    def load_best_model(self, model: RNNWinPredictor) -> None:
+    def load_best_model(self, model: nn.Module) -> None:
         if self.best_model_state is None:
             msg = "Unexpected state"
             raise RuntimeError(msg)
@@ -215,7 +213,7 @@ class TrainingComponents:
 
 
 def process_training_batch(
-    model: RNNWinPredictor,
+    model: nn.Module,
     batch_data: TrainingExample,
     training_components: TrainingComponents,
     decision_weight: int,
@@ -246,7 +244,7 @@ def process_training_batch(
 
 
 def evaluate_model(
-    model: RNNWinPredictor,
+    model: nn.Module,
     loader: DataLoader[TrainingExample],
     criterion: nn.BCEWithLogitsLoss,
 ) -> tuple[MetricsResult, np.ndarray]:
@@ -284,7 +282,7 @@ def evaluate_model(
 
 
 def train_step(
-    model: RNNWinPredictor,
+    model: nn.Module,
     train_loader: DataLoader[TrainingExample],
     training_components: TrainingComponents,
     decision_weight: int,

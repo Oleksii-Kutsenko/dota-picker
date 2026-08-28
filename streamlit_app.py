@@ -10,14 +10,13 @@ from dota_hero_picker.data_preparation import (
 )
 from dota_hero_picker.hero_data_manager import HeroDataManager, hero_positions
 from dota_hero_picker.model_trainer import ModelTrainer
-from dota_hero_picker.neural_network import RNNWinPredictor
 from dota_hero_picker.patch_resolver import get_latest_patch_id
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @st.cache_resource
-def get_model() -> RNNWinPredictor:
+def get_model() -> torch.nn.Module:
     model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
     st.success(f"Model loaded from {model_path}.")
 
@@ -91,7 +90,7 @@ def create_candidates(
 
 
 def suggest_best_picks(
-    model: RNNWinPredictor,
+    model: torch.nn.Module,
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],
@@ -149,7 +148,7 @@ def suggest_best_picks(
 
 
 def calculate_baseline_probability(
-    model: RNNWinPredictor,
+    model: torch.nn.Module,
     team_picks: list[str],
     opponent_picks: list[str],
 ) -> float:

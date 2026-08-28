@@ -10,7 +10,12 @@ import settings
 from dota_hero_picker.hero_data_manager import HeroDataManager
 
 from .data_manager import DataManager
-from .neural_network import NNParameters, RNNWinPredictor
+from .neural_network import (
+    NNParameters,
+    RNNWinPredictor,
+    SiameseDraftPredictor,
+    SiameseParameters,
+)
 from .patch_resolver import get_patches_number
 from .training_utils import (
     EarlyStopping,
@@ -46,7 +51,7 @@ class ModelTrainer:
             random_state,
         )
 
-        self.model: RNNWinPredictor | None = None
+        self.model: nn.Module | None = None
         self.training_arguments: TrainingArguments | None = None
         self.training_components: TrainingComponents | None = None
 
@@ -61,7 +66,7 @@ class ModelTrainer:
 
     def setup_custom_training(
         self,
-        model: RNNWinPredictor,
+        model: nn.Module,
         training_arguments: TrainingArguments,
     ) -> None:
         self.model = model
@@ -73,18 +78,16 @@ class ModelTrainer:
         )
 
     @classmethod
-    def create_default_model(cls) -> RNNWinPredictor:
-        return RNNWinPredictor(
-            NNParameters(
+    def create_default_model(cls) -> SiameseDraftPredictor:
+        return SiameseDraftPredictor(
+            SiameseParameters(
                 num_heroes=cls.hero_data_manager.get_heroes_number(),
                 num_patches=get_patches_number(),
-                heroes_embedding_dim=8,
+                d_model=32,
+                num_heads=4,
+                num_synergy_layers=1,
+                dropout_rate=0.3,
                 patch_embedding_dim=4,
-                gru_hidden_dim=16,
-                num_gru_layers=2,
-                dropout_rate=0.641814,
-                bidirectional=False,
-                num_heads=1,
             ),
         )
 
@@ -97,18 +100,18 @@ class ModelTrainer:
                 val_dataset=self.data_manager.val_dataset,
             ),
             pos_weight=self.data_manager.pos_weight,
-            early_stopping_patience=23,
+            early_stopping_patience=25,
             optimizer_parameters=OptimizerParameters(
-                lr=0.027106,
-                weight_decay=0.000794,
+                lr=0.0003,
+                weight_decay=0.005,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.794644,
-                scheduler_patience=14,
-                threshold=0.447229,
+                factor=0.7,
+                scheduler_patience=12,
+                threshold=1e-4,
             ),
-            decision_weight=17,
-            batch_size=128,
+            decision_weight=16,
+            batch_size=256,
         )
 
     def train_epoch(
