@@ -87,7 +87,7 @@ def train_best_model(csv_file_path: Path) -> None:
                 threshold=row["params_threshold"],
                 scheduler_patience=row["params_scheduler_patience"],
             ),
-            batch_size=row["params_batch_size"],
+            batch_size=int(row["params_batch_size"]),
             decision_weight=row["params_decision_weight"],
         )
 

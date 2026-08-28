@@ -38,11 +38,11 @@ def create_objective(
         heroes_embedding_dim = trial.suggest_categorical(
             "heroes_embedding_dim",
             [
+                4,
                 8,
                 16,
                 32,
                 64,
-                128,
             ],
         )
         patch_embedding_dim = trial.suggest_categorical(
@@ -58,6 +58,7 @@ def create_objective(
                 128,
                 256,
                 512,
+                1024,
             ],
         )
         num_gru_layers = trial.suggest_int("num_gru_layers", 1, 4)
@@ -78,10 +79,10 @@ def create_objective(
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            13,
+            12,
             26,
         )
-        num_heads = trial.suggest_categorical("num_heads", [1, 2, 4, 8])
+        num_heads = trial.suggest_categorical("num_heads", [1, 2, 4, 8, 16])
 
         model_params = NNParameters(
             num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
@@ -126,7 +127,7 @@ def create_objective(
                 threshold=trial.suggest_float(
                     "threshold",
                     1e-4,
-                    1e2,
+                    1,
                     log=True,
                 ),
                 scheduler_patience=scheduler_patience,
@@ -142,7 +143,7 @@ def create_objective(
                     1024,
                 ],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 8, 21),
+            decision_weight=trial.suggest_int("decision_weight", 8, 22),
         )
 
         model_trainer.setup_custom_training(model, training_arguments)
