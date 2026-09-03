@@ -1,6 +1,7 @@
 from pathlib import Path
 
 ACCOUNT_ID = 381437537
+OPTUNA_STORAGE = "sqlite:///optuna_study.db"
 API_HEROES_ENDPOINT = "https://api.opendota.com/api/heroes"
 PUBLIC_DOTA_MATCHES_PATH = (
     Path("dota_hero_picker") / Path("matches") / Path("public_matches.csv")

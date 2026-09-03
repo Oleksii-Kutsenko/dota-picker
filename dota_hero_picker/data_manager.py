@@ -15,7 +15,6 @@ from .data_preparation import (
 from .training_utils import (
     DotaDataset,
     compute_baseline_f1,
-    compute_pos_weight,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,7 +34,6 @@ class DataManager:
         self.random_state = random_state
 
         self.matches_dataframe = self.create_matches_dataframe()
-        self.pos_weight = compute_pos_weight(self.matches_dataframe)
         self.train_dataset, self.val_dataset, self.test_dataset = (
             self.prepare_datasets()
         )

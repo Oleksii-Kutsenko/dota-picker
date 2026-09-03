@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 from pathlib import Path
 from typing import Any
@@ -9,136 +10,161 @@ import torch
 import settings
 from dota_hero_picker.model_trainer import ModelTrainer
 from dota_hero_picker.neural_network import (
-    NNParameters,
-    RNNWinPredictor,
     SiameseDraftPredictor,
     SiameseParameters,
 )
 from dota_hero_picker.patch_resolver import get_patches_number
 from dota_hero_picker.training_utils import (
-    MetricsResult,
     OptimizerParameters,
     SchedulerParameters,
+    ShuffleEnum,
     TrainingArguments,
     TrainingData,
+    collect_logits_and_labels,
+    fit_temperature,
+    get_data_loader,
 )
 
 logger = logging.getLogger(__name__)
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def get_latest_study_name() -> str:
+    """Find the most recent Optuna study in the database."""
+    summaries = optuna.study.get_all_study_summaries(
+        storage=settings.OPTUNA_STORAGE,
+    )
+    if not summaries:
+        msg = "No studies found in the database"
+        raise RuntimeError(msg)
+
+    latest = max(
+        summaries,
+        key=lambda summary: summary.datetime_start,  # type: ignore[arg-type, return-value]
+    )
+    logger.info(f"Using latest study: {latest.study_name}")
+    return latest.study_name
+
+
+def build_candidate_setup(
+    row: pd.Series,
+    model_trainer: ModelTrainer,
+) -> tuple[SiameseDraftPredictor, SiameseParameters, TrainingArguments]:
+    """Convert an Optuna trial row into Model and TrainingArguments."""
+    model_params = SiameseParameters(
+        num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
+        num_patches=get_patches_number(),
+        d_model=int(row["params_d_model"]),
+        num_heads=int(row["params_num_heads"]),
+        num_synergy_layers=int(row["params_num_synergy_layers"]),
+        dropout_rate=float(row["params_dropout_rate"]),
+        patch_embedding_dim=int(row["params_patch_embedding_dim"]),
+    )
+    training_args = TrainingArguments(
+        data=TrainingData(
+            train_dataset=model_trainer.data_manager.train_dataset,
+            val_dataset=model_trainer.data_manager.val_dataset,
+        ),
+        early_stopping_patience=int(row["params_early_stopping_patience"]),
+        optimizer_parameters=OptimizerParameters(
+            lr=float(row["params_lr"]),
+            weight_decay=float(row["params_weight_decay"]),
+        ),
+        scheduler_parameters=SchedulerParameters(
+            factor=float(row["params_factor"]),
+            threshold=float(row["params_threshold"]),
+            scheduler_patience=int(row["params_scheduler_patience"]),
+        ),
+        batch_size=int(row["params_batch_size"]),
+        decision_weight=int(row["params_decision_weight"]),
+    )
+    return SiameseDraftPredictor(model_params), model_params, training_args
+
+
+def save_stable_model(
+    model_state: dict[str, Any],
+    model_params: SiameseParameters,
+    temperature: float,
+) -> None:
+    """Save the best model state, architecture parameters, and temperature."""
+    save_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
+    torch.save(
+        {
+            "model_state": model_state,
+            "model_params": dataclasses.asdict(model_params),
+            "temperature": temperature,
+        },
+        save_path,
+    )
+    logger.info(f"Successfully saved best model to {save_path}")
+
 
 def train_best_model(csv_file_path: Path) -> None:
-    """
-    Load the best parameters from the Optuna study
-    and trains the final model.
-    """
-    logger.info("Connecting to Optuna study database...")
     study = optuna.load_study(
-        study_name="dota_win_predictor_26_08_2026",
-        storage="sqlite:///optuna_study.db",
+        study_name=get_latest_study_name(),
+        storage=settings.OPTUNA_STORAGE,
     )
 
     trials_dataframe = study.trials_dataframe()
-    top_n_trials = 10
-    top_trials = (
+    best_trial = (
         trials_dataframe.loc[trials_dataframe["state"] == "COMPLETE"]
         .sort_values("value", ascending=False)
-        .head(top_n_trials)
+        .iloc[0]
     )
 
+    logger.info(f"Best Optuna trial Val MCC: {best_trial['value']:.4f}")
+
     model_trainer = ModelTrainer(csv_file_path)
-    num_heroes = model_trainer.hero_data_manager.get_heroes_number()
+    model, model_params, training_args = build_candidate_setup(
+        best_trial,
+        model_trainer,
+    )
 
-    best_overall_state: dict[str, Any] | None = None
-    best_overall_test_metrics: MetricsResult | None = None
-    best_trial_params: Any = None
+    model_trainer.setup_custom_training(model, training_args)
+    model_trainer.train_model()
 
-    for idx, (_, row) in enumerate(top_trials.iterrows(), 1):
-        logger.info(
-            f"--- Training Candidate {idx}/{len(top_trials)} "
-            f"(Val MCC: {row['value']:.4f}) ---"
-        )
-        if "params_d_model" in row and not pd.isna(row["params_d_model"]):
-            model_params = SiameseParameters(
-                num_heroes=num_heroes,
-                num_patches=get_patches_number(),
-                d_model=int(row["params_d_model"]),
-                num_heads=int(row["params_num_heads"]),
-                num_synergy_layers=int(row["params_num_synergy_layers"]),
-                dropout_rate=float(row["params_dropout_rate"]),
-                patch_embedding_dim=int(row["params_patch_embedding_dim"]),
-            )
-            model: torch.nn.Module = SiameseDraftPredictor(model_params)
-        else:
-            legacy_params = NNParameters(
-                num_heroes=num_heroes,
-                num_patches=get_patches_number(),
-                heroes_embedding_dim=int(row["params_heroes_embedding_dim"]),
-                patch_embedding_dim=int(row["params_patch_embedding_dim"]),
-                gru_hidden_dim=int(row["params_gru_hidden_dim"]),
-                num_gru_layers=int(row["params_num_gru_layers"]),
-                dropout_rate=float(row["params_dropout_rate"]),
-                bidirectional=bool(row["params_bidirectional"]),
-                num_heads=int(row["params_num_heads"]),
-            )
-            model = RNNWinPredictor(legacy_params)
+    assert model_trainer.training_components is not None
+    early_stopping = model_trainer.training_components.early_stopping
+    assert early_stopping.best_metrics is not None
+    assert early_stopping.best_model_state is not None
 
-        use_pos_weight = row.get("params_use_pos_weight", False)
+    logger.info(f"Retrained Val Metrics: {early_stopping.best_metrics}")
 
-        training_args = TrainingArguments(
-            data=TrainingData(
-                train_dataset=model_trainer.data_manager.train_dataset,
-                val_dataset=model_trainer.data_manager.val_dataset,
-            ),
-            pos_weight=(
-                model_trainer.data_manager.pos_weight
-                if use_pos_weight
-                else None
-            ),
-            early_stopping_patience=row["params_early_stopping_patience"],
-            optimizer_parameters=OptimizerParameters(
-                lr=row["params_lr"],
-                weight_decay=row["params_weight_decay"],
-            ),
-            scheduler_parameters=SchedulerParameters(
-                factor=row["params_factor"],
-                threshold=row["params_threshold"],
-                scheduler_patience=row["params_scheduler_patience"],
-            ),
-            batch_size=int(row["params_batch_size"]),
-            decision_weight=row["params_decision_weight"],
-        )
+    # --- Platt scaling: fit temperature on validation set ---
+    val_loader = get_data_loader(
+        model_trainer.data_manager.val_dataset,
+        training_args.batch_size,
+        ShuffleEnum.UNSHUFFLED,
+    )
+    val_logits, val_labels = collect_logits_and_labels(model, val_loader)
+    temperature = fit_temperature(val_logits, val_labels)
 
-        model_trainer.setup_custom_training(model, training_args)
-        model_trainer.train_model()
+    raw_test_metrics = model_trainer.evaluate_on_test(temperature=1.0)
+    calibrated_test_metrics = model_trainer.evaluate_on_test(
+        temperature=temperature,
+    )
 
-        test_metrics = model_trainer.evaluate_on_test()
-        logger.info(f"Candidate {idx} Test Metrics: {test_metrics}")
+    save_stable_model(
+        early_stopping.best_model_state,
+        model_params,
+        temperature,
+    )
 
-        assert model_trainer.training_components is not None
-        current_state = (
-            model_trainer.training_components.early_stopping.best_model_state
-        )
-
-        if (
-            best_overall_test_metrics is None
-            or test_metrics.mcc > best_overall_test_metrics.mcc
-        ):
-            best_overall_test_metrics = test_metrics
-            best_overall_state = current_state
-            best_trial_params = row
-
-    if (
-        best_overall_state is not None
-        and best_overall_test_metrics is not None
-    ):
-        save_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
-        torch.save(best_overall_state, save_path)
-        logger.info("--------------------------------------------------")
-        logger.info(f"Successfully saved best model to {save_path}")
-        logger.info(f"Best Test Metrics: {best_overall_test_metrics}")
-        logger.info("Best Trial Parameters:")
-        logger.info(best_trial_params)
-        logger.info("--------------------------------------------------")
+    logger.info("--------------------------------------------------")
+    logger.info(f"Calibration temperature: {temperature:.4f}")
+    logger.info(f"Best Validation Metrics: {early_stopping.best_metrics}")
+    logger.info(f"Test Metrics (Uncalibrated T=1.0): {raw_test_metrics}")
+    logger.info(
+        f"Test Metrics (Calibrated T={temperature:.4f}): "
+        f"{calibrated_test_metrics}",
+    )
+    logger.info(
+        f"Calibration Impact: Loss {raw_test_metrics.loss:.4f} "
+        f"-> {calibrated_test_metrics.loss:.4f} | "
+        f"ECE {raw_test_metrics.ece:.4f} -> {calibrated_test_metrics.ece:.4f}",
+    )
+    logger.info("--------------------------------------------------")
 
 
 def main() -> None:

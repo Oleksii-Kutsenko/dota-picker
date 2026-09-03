@@ -9,23 +9,32 @@ from dota_hero_picker.data_preparation import (
     MAX_PICK,
 )
 from dota_hero_picker.hero_data_manager import HeroDataManager, hero_positions
-from dota_hero_picker.model_trainer import ModelTrainer
+from dota_hero_picker.neural_network import (
+    SiameseDraftPredictor,
+    SiameseParameters,
+)
 from dota_hero_picker.patch_resolver import get_latest_patch_id
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @st.cache_resource
-def get_model() -> torch.nn.Module:
+def get_model() -> tuple[torch.nn.Module, float]:
     model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
-    st.success(f"Model loaded from {model_path}.")
 
-    model = ModelTrainer.create_default_model()
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    checkpoint = torch.load(model_path, map_location=device)
+    temperature = checkpoint["temperature"]
+
+    model_params = SiameseParameters(**checkpoint["model_params"])
+    model = SiameseDraftPredictor(model_params)
+    model.load_state_dict(checkpoint["model_state"])
     model.to(device)
     model.eval()
 
-    return model
+    st.success(
+        f"Model loaded from {model_path} (temperature={temperature:.4f}).",
+    )
+    return model, temperature
 
 
 @st.cache_resource
@@ -34,7 +43,7 @@ def get_hero_data_manager() -> HeroDataManager:
 
 
 hero_data_manager = get_hero_data_manager()
-loaded_model = get_model()
+loaded_model, model_temperature = get_model()
 latest_patch_id = get_latest_patch_id()
 
 
@@ -94,7 +103,7 @@ def suggest_best_picks(
     team_picks: list[str],
     opponent_picks: list[str],
     allowed_positions: list[int],
-    top_n: int = 20,
+    temperature: float,
 ) -> list[tuple[str, float]]:
     model.eval()
 
@@ -139,18 +148,21 @@ def suggest_best_picks(
                 device=device,
             ),
         )
-        probabilities = torch.sigmoid(logits).cpu().numpy().flatten()
+        probabilities = (
+            torch.sigmoid(logits / temperature).cpu().numpy().flatten()
+        )
 
     results = list(zip(candidate_heroes, probabilities, strict=False))
 
     results.sort(key=lambda x: x[1], reverse=True)
-    return results[:top_n]
+    return results[:30]
 
 
 def calculate_baseline_probability(
     model: torch.nn.Module,
     team_picks: list[str],
     opponent_picks: list[str],
+    temperature: float,
 ) -> float:
     baseline_ids = build_draft_sequence(
         team_picks,
@@ -183,7 +195,7 @@ def calculate_baseline_probability(
             hero_features_tensor,
             patch_tensor,
         )
-        return torch.sigmoid(baseline_logits).item()
+        return torch.sigmoid(baseline_logits / temperature).item()
 
 
 st.title("Dota Picker Web UI")
@@ -264,6 +276,7 @@ if st.button("Get Suggestions"):
         team_picks_multiselect,
         opponent_picks_multiselect,
         allowed,
+        model_temperature,
     )
     st.subheader("Top Suggested Picks (as next team pick)")
 
@@ -271,6 +284,7 @@ if st.button("Get Suggestions"):
         loaded_model,
         team_picks_multiselect,
         opponent_picks_multiselect,
+        model_temperature,
     )
 
     st.metric(

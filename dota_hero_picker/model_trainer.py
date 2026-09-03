@@ -4,6 +4,7 @@ from pathlib import Path
 import optuna
 import torch
 from torch import nn, optim
+from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 
 import settings
@@ -11,8 +12,6 @@ from dota_hero_picker.hero_data_manager import HeroDataManager
 
 from .data_manager import DataManager
 from .neural_network import (
-    NNParameters,
-    RNNWinPredictor,
     SiameseDraftPredictor,
     SiameseParameters,
 )
@@ -83,11 +82,11 @@ class ModelTrainer:
             SiameseParameters(
                 num_heroes=cls.hero_data_manager.get_heroes_number(),
                 num_patches=get_patches_number(),
-                d_model=32,
-                num_heads=4,
-                num_synergy_layers=1,
-                dropout_rate=0.3,
-                patch_embedding_dim=4,
+                d_model=16,
+                num_heads=2,
+                num_synergy_layers=3,
+                dropout_rate=0.363054,
+                patch_embedding_dim=32,
             ),
         )
 
@@ -99,18 +98,17 @@ class ModelTrainer:
                 train_dataset=self.data_manager.train_dataset,
                 val_dataset=self.data_manager.val_dataset,
             ),
-            pos_weight=self.data_manager.pos_weight,
-            early_stopping_patience=25,
+            early_stopping_patience=15,
             optimizer_parameters=OptimizerParameters(
-                lr=0.0003,
-                weight_decay=0.005,
+                lr=0.000648,
+                weight_decay=0.0,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.7,
+                factor=0.785886,
                 scheduler_patience=12,
-                threshold=1e-4,
+                threshold=0.019316,
             ),
-            decision_weight=16,
+            decision_weight=22,
             batch_size=256,
         )
 
@@ -137,12 +135,13 @@ class ModelTrainer:
             self.model,
             val_loader,
             self.training_components.criterion,
+            1,
         )
         logger.info(val_metrics)
-        self.training_components.scheduler.step(val_metrics.loss)
+        self.training_components.scheduler.step(val_metrics.mcc)
 
         self.training_components.early_stopping(
-            val_metrics.loss,
+            val_metrics.mcc,
             val_metrics,
             self.model,
         )
@@ -170,7 +169,7 @@ class ModelTrainer:
         )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            "min",
+            "max",
             factor=self.training_arguments.scheduler_parameters.factor,
             threshold=self.training_arguments.scheduler_parameters.threshold,
             patience=self.training_arguments.scheduler_parameters.scheduler_patience,
@@ -183,6 +182,7 @@ class ModelTrainer:
             early_stopping=EarlyStopping(
                 patience=self.training_arguments.early_stopping_patience,
             ),
+            scaler=GradScaler(enabled=torch.cuda.is_available()),
         )
 
         train_loader = get_data_loader(
@@ -219,7 +219,7 @@ class ModelTrainer:
                 break
 
         if (
-            self.training_components.early_stopping.best_val_loss is None
+            self.training_components.early_stopping.best_score is None
             or self.training_components.early_stopping.best_metrics is None
             or self.training_components.early_stopping.best_model_state is None
         ):
@@ -230,16 +230,13 @@ class ModelTrainer:
             self.training_components.early_stopping.best_model_state,
         )
 
-    def evaluate_on_test(self) -> MetricsResult:
+    def evaluate_on_test(self, temperature: float) -> MetricsResult:
         if self.model is None or self.training_arguments is None:
             msg = "Model must be trained before evaluation"
             raise RuntimeError(msg)
 
         criterion = nn.BCEWithLogitsLoss(
             reduction="none",
-            pos_weight=self.training_arguments.pos_weight
-            if self.training_arguments.pos_weight is not None
-            else None,
         )
 
         test_loader = get_data_loader(
@@ -252,6 +249,7 @@ class ModelTrainer:
             self.model,
             test_loader,
             criterion,
+            temperature,
         )
 
         return metrics
@@ -264,7 +262,7 @@ class ModelTrainer:
         self.train_model()
         assert self.training_components is not None
 
-        test_metrics = self.evaluate_on_test()
+        test_metrics = self.evaluate_on_test(1)
 
         logger.info("Test Metrics")
         logger.info(test_metrics)

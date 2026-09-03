@@ -3,8 +3,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 import optuna
+import pandas as pd
 from optuna import Trial
 
+import settings
 from dota_hero_picker.hero_data_manager import HeroDataManager
 from dota_hero_picker.training_utils import (
     OptimizerParameters,
@@ -16,8 +18,6 @@ from dota_hero_picker.training_utils import (
 
 from .model_trainer import ModelTrainer
 from .neural_network import (
-    NNParameters,
-    RNNWinPredictor,
     SiameseDraftPredictor,
     SiameseParameters,
 )
@@ -32,38 +32,34 @@ def create_objective(
     model_trainer: ModelTrainer,
 ) -> Callable[[Trial], float]:
     def objective(trial: Trial) -> float:
-        use_pos_weight = trial.suggest_categorical(
-            "use_pos_weight",
-            [False, True],
-        )
 
         d_model = trial.suggest_categorical(
             "d_model",
-            [16, 32, 64, 128],
+            [16, 32, 64, 128, 256],
         )
-        valid_heads = [h for h in [1, 2, 4, 8] if d_model % h == 0]
+        valid_heads = [h for h in [1, 2, 4, 8, 16] if d_model % h == 0]
         num_heads = trial.suggest_categorical("num_heads", valid_heads)
 
         num_synergy_layers = trial.suggest_int("num_synergy_layers", 1, 3)
         dropout_rate = trial.suggest_float(
             "dropout_rate",
-            0.15,
-            0.55,
+            0.10,
+            0.40,
         )
         patch_embedding_dim = trial.suggest_categorical(
             "patch_embedding_dim",
-            [1, 2, 4, 8, 16],
+            [1, 2, 4, 8, 16, 32, 64],
         )
 
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            4,
-            19,
+            6,
+            18,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
             12,
-            28,
+            27,
         )
 
         model_params = SiameseParameters(
@@ -85,12 +81,9 @@ def create_objective(
                 train_dataset=model_trainer.data_manager.train_dataset,
                 val_dataset=model_trainer.data_manager.val_dataset,
             ),
-            pos_weight=model_trainer.data_manager.pos_weight
-            if use_pos_weight
-            else None,
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-5, 1e-1, log=True),
+                lr=trial.suggest_float("lr", 1e-6, 1e-2, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
                     1e-7,
@@ -102,7 +95,7 @@ def create_objective(
                 factor=trial.suggest_float(
                     "factor",
                     0.6,
-                    0.9,
+                    1,
                 ),
                 threshold=trial.suggest_float(
                     "threshold",
@@ -150,8 +143,13 @@ def main(csv_file_path: Path) -> None:
     model_trainer = ModelTrainer(csv_file_path)
     objective = create_objective(model_trainer)
 
+    study_name = (
+        f"dota_win_predictor_{pd.Timestamp.now().strftime('%d_%m_%Y')}"
+    )
+    logger.info(f"Study name: {study_name}")
+
     study = optuna.create_study(
-        study_name="dota_win_predictor_28_08_2026",
+        study_name=study_name,
         direction="maximize",
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
@@ -161,13 +159,13 @@ def main(csv_file_path: Path) -> None:
             max_resource=75,
             reduction_factor=3,
         ),
-        storage="sqlite:///optuna_study.db",
+        storage=settings.OPTUNA_STORAGE,
         load_if_exists=True,
     )
 
     study.optimize(
         objective,
-        n_trials=250,
+        n_trials=260,
         show_progress_bar=True,
     )
     fig = optuna.visualization.plot_optimization_history(study)
