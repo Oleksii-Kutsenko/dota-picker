@@ -44,33 +44,36 @@ class DataManager:
         matches_dataframe = pd.read_csv(
             self.csv_file_path,
             converters={
-                "team_picks": str,
-                "opponent_picks": str,
+                "team_picks": json.loads,
+                "opponent_picks": json.loads,
             },
             dtype={
                 "win": int,
                 "picked_hero": int,
             },
         )
-        pick_columns = [
-            "team_picks",
-            "opponent_picks",
-        ]
-        for column in pick_columns:
-            matches_dataframe[column] = matches_dataframe[column].apply(
-                json.loads,
-            )
-            matches_dataframe[column] = matches_dataframe[column].apply(
-                lambda hero_list: [
-                    self.hero_data_manager.get_hero_id_by_api_id(api_id)
-                    for api_id in hero_list
-                ],
-            )
-        matches_dataframe["picked_hero"] = matches_dataframe[
-            "picked_hero"
-        ].map(self.hero_data_manager.get_hero_id_by_api_id)
 
-        return matches_dataframe
+        team_pick_cols = [f"team_pick_{i}" for i in range(1, 6)]
+        opp_pick_cols = [f"opp_pick_{i}" for i in range(1, 6)]
+
+        matches_dataframe[team_pick_cols] = pd.DataFrame(
+            matches_dataframe["team_picks"].tolist(),
+            index=matches_dataframe.index,
+        )
+        matches_dataframe[opp_pick_cols] = pd.DataFrame(
+            matches_dataframe["opponent_picks"].tolist(),
+            index=matches_dataframe.index,
+        )
+
+        all_pick_cols = team_pick_cols + opp_pick_cols + ["picked_hero"]
+        for col in all_pick_cols:
+            matches_dataframe[col] = matches_dataframe[col].map(
+                self.hero_data_manager.get_hero_id_by_api_id,
+            )
+
+        return matches_dataframe.drop(
+            columns=["team_picks", "opponent_picks"],
+        )
 
     def prepare_datasets(
         self,

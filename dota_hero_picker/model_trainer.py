@@ -18,6 +18,7 @@ from .neural_network import (
 from .patch_resolver import get_patches_number
 from .training_utils import (
     EarlyStopping,
+    EarlyStoppingMode,
     MetricsResult,
     OptimizerParameters,
     SchedulerParameters,
@@ -138,10 +139,10 @@ class ModelTrainer:
             1,
         )
         logger.info(val_metrics)
-        self.training_components.scheduler.step(val_metrics.mcc)
+        self.training_components.scheduler.step(val_metrics.loss)
 
         self.training_components.early_stopping(
-            val_metrics.mcc,
+            val_metrics.loss,
             val_metrics,
             self.model,
         )
@@ -169,7 +170,7 @@ class ModelTrainer:
         )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            "max",
+            "min",
             factor=self.training_arguments.scheduler_parameters.factor,
             threshold=self.training_arguments.scheduler_parameters.threshold,
             patience=self.training_arguments.scheduler_parameters.scheduler_patience,
@@ -181,6 +182,7 @@ class ModelTrainer:
             scheduler=scheduler,
             early_stopping=EarlyStopping(
                 patience=self.training_arguments.early_stopping_patience,
+                mode=EarlyStoppingMode.MIN,
             ),
             scaler=GradScaler(enabled=torch.cuda.is_available()),
         )
@@ -204,7 +206,7 @@ class ModelTrainer:
             )
 
             if trial is not None:
-                intermediate_value = float(val_metrics.mcc)
+                intermediate_value = float(val_metrics.loss)
                 trial.report(intermediate_value, step=epoch)
 
                 if trial.should_prune():

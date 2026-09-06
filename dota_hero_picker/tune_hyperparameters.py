@@ -1,4 +1,5 @@
 import logging
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
@@ -35,12 +36,26 @@ def create_objective(
 
         d_model = trial.suggest_categorical(
             "d_model",
-            [16, 32, 64, 128, 256],
+            [
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+            ],
         )
-        valid_heads = [h for h in [1, 2, 4, 8, 16] if d_model % h == 0]
-        num_heads = trial.suggest_categorical("num_heads", valid_heads)
-
-        num_synergy_layers = trial.suggest_int("num_synergy_layers", 1, 3)
+        num_heads = trial.suggest_categorical(
+            "num_heads",
+            [
+                1,
+                2,
+                4,
+                8,
+                16,
+            ],
+        )
+        num_synergy_layers = trial.suggest_int("num_synergy_layers", 1, 4)
         dropout_rate = trial.suggest_float(
             "dropout_rate",
             0.10,
@@ -48,19 +63,70 @@ def create_objective(
         )
         patch_embedding_dim = trial.suggest_categorical(
             "patch_embedding_dim",
-            [1, 2, 4, 8, 16, 32, 64],
+            [
+                2,
+                4,
+                8,
+                16,
+                32,
+                64,
+            ],
         )
-
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            6,
-            18,
+            5,
+            15,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            12,
-            27,
+            10,
+            25,
         )
+
+        training_arguments = TrainingArguments(
+            data=TrainingData(
+                train_dataset=model_trainer.data_manager.train_dataset,
+                val_dataset=model_trainer.data_manager.val_dataset,
+            ),
+            early_stopping_patience=(early_stopping_patience),
+            optimizer_parameters=OptimizerParameters(
+                lr=trial.suggest_float("lr", 1e-7, 1e-2, log=True),
+                weight_decay=trial.suggest_float(
+                    "weight_decay",
+                    1e-6,
+                    1e-2,
+                    log=True,
+                ),
+            ),
+            scheduler_parameters=SchedulerParameters(
+                factor=trial.suggest_float(
+                    "factor",
+                    0.5,
+                    1.0,
+                ),
+                threshold=trial.suggest_float(
+                    "threshold",
+                    1e-6,
+                    1e-2,
+                    log=True,
+                ),
+                scheduler_patience=scheduler_patience,
+            ),
+            batch_size=trial.suggest_categorical(
+                "batch_size",
+                [
+                    64,
+                    128,
+                    256,
+                    512,
+                    1024,
+                ],
+            ),
+            decision_weight=trial.suggest_int("decision_weight", 10, 24),
+        )
+
+        if d_model % num_heads != 0:
+            raise optuna.TrialPruned
 
         model_params = SiameseParameters(
             num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
@@ -76,49 +142,6 @@ def create_objective(
         trainable_params = count_trainable_params(model)
         trial.set_user_attr("model_trainable_params", trainable_params)
 
-        training_arguments = TrainingArguments(
-            data=TrainingData(
-                train_dataset=model_trainer.data_manager.train_dataset,
-                val_dataset=model_trainer.data_manager.val_dataset,
-            ),
-            early_stopping_patience=(early_stopping_patience),
-            optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-6, 1e-2, log=True),
-                weight_decay=trial.suggest_float(
-                    "weight_decay",
-                    1e-7,
-                    1e-1,
-                    log=True,
-                ),
-            ),
-            scheduler_parameters=SchedulerParameters(
-                factor=trial.suggest_float(
-                    "factor",
-                    0.6,
-                    1,
-                ),
-                threshold=trial.suggest_float(
-                    "threshold",
-                    1e-4,
-                    1,
-                    log=True,
-                ),
-                scheduler_patience=scheduler_patience,
-            ),
-            batch_size=trial.suggest_categorical(
-                "batch_size",
-                [
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    1024,
-                ],
-            ),
-            decision_weight=trial.suggest_int("decision_weight", 8, 22),
-        )
-
         model_trainer.setup_custom_training(model, training_arguments)
         model_trainer.train_model(
             trial=trial,
@@ -130,7 +153,7 @@ def create_objective(
             is not None
         )
         return float(
-            model_trainer.training_components.early_stopping.best_metrics.mcc,
+            model_trainer.training_components.early_stopping.best_metrics.loss,
         )
 
     return objective
@@ -143,14 +166,15 @@ def main(csv_file_path: Path) -> None:
     model_trainer = ModelTrainer(csv_file_path)
     objective = create_objective(model_trainer)
 
+    current_date = pd.Timestamp.now().strftime("%Y%m%d")
     study_name = (
-        f"dota_win_predictor_{pd.Timestamp.now().strftime('%d_%m_%Y')}"
+        f"dota_win_predictor_loss_{current_date}_{uuid.uuid4().hex[:8]}"
     )
     logger.info(f"Study name: {study_name}")
 
     study = optuna.create_study(
         study_name=study_name,
-        direction="maximize",
+        direction="minimize",
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
         ),
@@ -165,7 +189,7 @@ def main(csv_file_path: Path) -> None:
 
     study.optimize(
         objective,
-        n_trials=260,
+        n_trials=240,
         show_progress_bar=True,
     )
     fig = optuna.visualization.plot_optimization_history(study)

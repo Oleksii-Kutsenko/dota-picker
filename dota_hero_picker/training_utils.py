@@ -28,6 +28,8 @@ from torchmetrics.classification import (
     BinaryRecall,
 )
 
+from dota_hero_picker.data_preparation import SLOT_COLUMNS
+
 logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -56,28 +58,28 @@ def get_metrics_collection() -> MetricCollection:
 
 
 TrainingExample = tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
+    torch.Tensor,  # draft_sequence
+    torch.Tensor,  # hero_features
+    torch.Tensor,  # patch_id
+    torch.Tensor,  # win
+    torch.Tensor,  # is_my_decision
 ]
 
 
 class DotaDataset(Dataset[TrainingExample]):
-    """Stores dota 2 matches."""
+    """Stores Dota 2 matches."""
 
     def __init__(
         self,
         dataframe: pd.DataFrame,
     ) -> None:
         self.draft_sequences = torch.tensor(
-            np.stack(dataframe["draft_sequence"].values),  # type: ignore[call-overload]
+            dataframe[SLOT_COLUMNS].fillna(0).to_numpy(dtype=np.int64),
             dtype=torch.long,
             device=device,
         )
         self.hero_features = torch.tensor(
-            np.stack(dataframe["hero_features"].values),  # type: ignore[call-overload]
+            np.stack(dataframe["hero_features"].to_list()),
             dtype=torch.float,
             device=device,
         )
@@ -101,14 +103,13 @@ class DotaDataset(Dataset[TrainingExample]):
         """Return dataset length."""
         return len(self.draft_sequences)
 
-    def __getitem__(self, idx: int) -> TrainingExample:
-        """Return training example."""
+    def __getitem__(self, index: int) -> TrainingExample:
         return (
-            self.draft_sequences[idx],
-            self.hero_features[idx],
-            self.patch_ids[idx],
-            self.wins[idx],
-            self.is_my_decisions[idx],
+            self.draft_sequences[index],
+            self.hero_features[index],
+            self.patch_ids[index],
+            self.wins[index],
+            self.is_my_decisions[index],
         )
 
 
@@ -140,7 +141,7 @@ class MetricsResult:
     f1: float
     auc: float
     mcc: float
-    ece: float = 0.0  # <--- Added
+    ece: float = 0.0
     confusion_matrix: np.ndarray | None = None
 
     def __str__(self) -> str:
@@ -152,13 +153,12 @@ class MetricsResult:
         )
 
 
-
 def process_evaluation_batch(
     model: nn.Module,
     batch_data: TrainingExample,
     criterion: nn.BCEWithLogitsLoss,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    draft_sequence, hero_features, patch_id, is_win, _ = batch_data
+    draft_sequence, hero_features, patch_id, is_win, *_ = batch_data
 
     outputs = model(draft_sequence, hero_features, patch_id)
     per_sample_loss = criterion(outputs, is_win)
@@ -243,33 +243,32 @@ def process_training_batch(
     training_components: TrainingComponents,
     decision_weight: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Process a single batch: forward pass, loss computation,
-    and optimization step.
-    """
-    draft_sequence, hero_features, patch_id, is_win, is_my_decision = (
-        batch_data
-    )
+    (
+        draft_sequence,
+        hero_features,
+        patch_id,
+        is_win,
+        is_my_decision,
+    ) = batch_data
 
     training_components.optimizer.zero_grad(set_to_none=True)
 
-    with torch.autocast(device_type=device.type):
-        outputs = model(draft_sequence, hero_features, patch_id)
+    outputs = model(draft_sequence, hero_features, patch_id)
 
-        per_sample_loss = training_components.criterion(outputs, is_win)
-        weights = torch.where(
-            (is_my_decision == 1.0),
-            decision_weight,
-            1.0,
-        )
-        loss = (per_sample_loss * weights).sum() / weights.sum()
+    per_sample_loss = training_components.criterion(outputs, is_win)
 
-    training_components.scaler.scale(loss).backward()
+    decision_weights = torch.where(
+        (is_my_decision == 1),
+        float(decision_weight),
+        1.0,
+    )
+    loss = (per_sample_loss * decision_weights).sum() / decision_weights.sum()
 
-    training_components.scaler.step(training_components.optimizer)
-    training_components.scaler.update()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    training_components.optimizer.step()
 
-    return loss.detach(), outputs.float(), is_win
+    return loss.detach(), outputs.detach(), is_win
 
 
 def evaluate_model(
@@ -280,25 +279,35 @@ def evaluate_model(
 ) -> tuple[MetricsResult, np.ndarray]:
     model.eval()
 
-    all_losses: list[torch.Tensor] = []
-    all_probs_tensors: list[torch.Tensor] = []
+    total_loss = torch.tensor(0.0, device=device)
 
     metrics_collection = get_metrics_collection()
+    total_samples = 0
+    all_probs_tensors: list[torch.Tensor] = []
 
     with torch.no_grad():
         for batch_data in loader:
-            draft_sequence, hero_features, patch_id, is_win, _ = batch_data
+            (
+                draft_sequence,
+                hero_features,
+                patch_id,
+                is_win,
+                _,
+            ) = batch_data
+
             outputs = model(draft_sequence, hero_features, patch_id)
 
-            scaled_outputs = outputs / temperature
+            scaled_outputs = outputs.float() / temperature
             per_sample_loss = criterion(scaled_outputs, is_win)
-            all_losses.append(per_sample_loss.mean().detach())
+
+            total_loss += per_sample_loss.sum()
+            total_samples += is_win.numel()
 
             probs = torch.sigmoid(scaled_outputs)
             all_probs_tensors.append(probs)
             metrics_collection.update(probs, is_win)
 
-    avg_loss = torch.stack(all_losses).mean().item()
+    avg_loss = (total_loss / total_samples).item()
     all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
     results = metrics_collection.compute()
 
@@ -443,7 +452,8 @@ def collect_logits_and_labels(
 
     with torch.no_grad():
         for batch_data in loader:
-            draft_sequence, hero_features, patch_id, is_win, _ = batch_data
+            draft_sequence, hero_features, patch_id, is_win, *_ = batch_data
+
             outputs = model(draft_sequence, hero_features, patch_id)
             all_logits.append(outputs)
             all_labels.append(is_win)

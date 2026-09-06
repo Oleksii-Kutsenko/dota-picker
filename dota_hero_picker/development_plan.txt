@@ -1,30 +1,55 @@
-All traning and models will be relevant only for current patch. This decision related to the futher updates, I want to incorporate hero features to the input vector, and it's hard to collect historical heroes features, and incorporate them properly (hero re-works).
+Idea: Switch optimization objective from thresholded MCC to continuous BCE loss for HPO, EarlyStopping, and ReduceLROnPlateau.
+Result:
+Before:
+2026-09-04 16:11:07,189 - INFO - TOP CANDIDATES RETRAINING BENCHMARK (SEEDS: 42, 123, 999)
+===============================================================================
+Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE | Mean MCC
+-------------------------------------------------------------------------------
+1     | #54     | 0.2765   | 0.5978 (0.0194)    | 0.6736 (0.0037)    | 0.0607   | 0.1193
+2     | #198    | 0.2676   | 0.5859 (0.0059)    | 0.6903 (0.0066)    | 0.0548   | 0.1069
+3     | #209    | 0.2653   | 0.5776 (0.0177)    | 0.6854 (0.0068)    | 0.0519   | 0.1149
+4     | #230    | 0.2818   | 0.5622 (0.0348)    | 0.6697 (0.0162)    | 0.0428   | 0.1024
+5     | #127    | 0.2660   | 0.5621 (0.0083)    | 0.6911 (0.0036)    | 0.0522   | 0.0994
+After:
+2026-09-05 13:31:53,981 - INFO - TOP CANDIDATES RETRAINING BENCHMARK (SEEDS: 42, 123, 999)
+===============================================================================
+Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE | Mean MCC
+-------------------------------------------------------------------------------
+1     | #181    | 0.6187   | 0.5861 (0.0231)    | 0.6791 (0.0059)    | 0.0460   | 0.1527
+2     | #100    | 0.6028   | 0.5796 (0.0081)    | 0.6929 (0.0095)    | 0.0685   | 0.1347
+3     | #169    | 0.6165   | 0.5610 (0.0095)    | 0.6922 (0.0062)    | 0.0520   | 0.0744
+4     | #10     | 0.6106   | 0.5598 (0.0216)    | 0.6971 (0.0110)    | 0.0726   | 0.1046
+5     | #129    | 0.6098   | 0.5571 (0.0018)    | 0.6996 (0.0045)    | 0.0625   | 0.1066
 
-Add binary ability indicators from OpenDota heroes.json:
-- has_stun, has_root, has_silence, has_slow, has_hex
-- has_aoe, has_pure_damage, has_break, has_dispel
-- provides_vision, is_invisible
+Idea: Attenuate early-prefix loss penalties by scaling sample weights by draft completeness (prefix_length / 9).
+Result: Reverted (Failed).
+Before:
+2026-09-05 13:31:53,981 - INFO - TOP CANDIDATES RETRAINING BENCHMARK (SEEDS: 42, 123, 999)
+===============================================================================
+Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE | Mean MCC
+-------------------------------------------------------------------------------
+1     | #181    | 0.6187   | 0.5861 (0.0231)    | 0.6791 (0.0059)    | 0.0460   | 0.1527
+2     | #100    | 0.6028   | 0.5796 (0.0081)    | 0.6929 (0.0095)    | 0.0685   | 0.1347
+3     | #169    | 0.6165   | 0.5610 (0.0095)    | 0.6922 (0.0062)    | 0.0520   | 0.0744
+4     | #10     | 0.6106   | 0.5598 (0.0216)    | 0.6971 (0.0110)    | 0.0726   | 0.1046
+5     | #129    | 0.6098   | 0.5571 (0.0018)    | 0.6996 (0.0045)    | 0.0625   | 0.1066
+After:
+2026-09-06 04:17:41,987 - INFO - TOP CANDIDATES RETRAINING BENCHMARK (SEEDS: 42, 123, 999)
+===============================================================================
+Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE | Mean MCC
+-------------------------------------------------------------------------------
+1     | #146    | 0.6577   | 0.5810 (0.0305)    | 0.6976 (0.0159)    | 0.0633   | 0.1364
+2     | #29     | 0.6621   | 0.5471 (0.0268)    | 0.6997 (0.0073)    | 0.0664   | 0.0548
+3     | #148    | 0.6627   | 0.5297 (0.0115)    | 0.7139 (0.0012)    | 0.0738   | 0.0257
+4     | #184    | 0.6537   | 0.5223 (0.0105)    | 0.7184 (0.0020)    | 0.0894   | 0.0177
+5     | #118    | 0.6503   | 0.5092 (0.0295)    | 0.7102 (0.0126)    | 0.0673   | 0.0034
+Reverted:
 
-Add to Optuna search space:
-- optimizer_type: ['Adam', 'AdamW', 'RMSprop']  (skip SGD for RNNs)
-- activation_function: ['relu', 'gelu', 'tanh']
-- use_layer_norm: [True, False]
-- gradient_clip_value: [0.5, 1.0, 5.0]
-- dropout_embedding: [0.0, 0.1, 0.2, 0.3]
+Idea: Initialize hero_emb from PCA-projected tabular features (warm-start) and drop runtime tabular concatenation and feature_proj.
+Result: 
 
-After training best model:
-- Use sklearn.calibration.CalibratedClassifierCV
-- Method: 'isotonic' or 'sigmoid' (Platt scaling)
-- Evaluate with Brier score and reliability diagram
-- This ensures win probabilities are trustworthy
+Idea: Add binary ability indicators (has_stun, has_silence, has_break, has_dispel, has_bkb_pierce, is_illusion) to provide cross-attention with direct mechanics signals.
+Result: 
 
-For each hero, add features:
-- your_winrate_with_hero (from your matches)
-- your_avg_kda_with_hero
-- general_winrate (from OpenDota /heroes endpoint)
-- pick_rate, ban_rate
-
-Supplement with broader datasets: Download public pro/high-MMR match data from OpenDota or Kaggle datasets; merge with your personal match data, applying sample weighting (e.g., via PyTorch's WeightedRandomSampler) to prioritize your games during training.
-Add statistics hero attributes: For each hero in the draft, compute and concatenate features like historical win rate, average damage dealt, and so on, can also collect/save and later add my hero performance to input vector, sourced from OpenDota or personal data; normalize these values for model stability.
-Update evaluation protocol: Compute AUC, Brier score, and per-patch performance on a held-out test set; add offline counterfactual tests by simulating draft perturbations and checking recommendation stability.
-
+Idea: Add personal comfort features (player_matches_with_hero, player_winrate_with_hero) from match history.
+Result: 

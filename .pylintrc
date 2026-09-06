@@ -442,7 +442,8 @@ disable=raw-checker-failed,
         missing-module-docstring,
         logging-fstring-interpolation,
         missing-function-docstring,
-        docstring-first-line-empty
+        docstring-first-line-empty,
+        missing-class-docstring
 
 # Enable the message, report, category or checker with the given id(s). You can
 # either give multiple identifier separated by comma (,) or put this option
