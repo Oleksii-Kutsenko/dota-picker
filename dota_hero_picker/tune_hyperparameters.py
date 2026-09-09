@@ -1,10 +1,13 @@
 import logging
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
 import optuna
+import pandas as pd
 from optuna import Trial
 
+import settings
 from dota_hero_picker.hero_data_manager import HeroDataManager
 from dota_hero_picker.training_utils import (
     OptimizerParameters,
@@ -16,8 +19,8 @@ from dota_hero_picker.training_utils import (
 
 from .model_trainer import ModelTrainer
 from .neural_network import (
-    NNParameters,
-    RNNWinPredictor,
+    SiameseDraftPredictor,
+    SiameseParameters,
 )
 from .patch_resolver import get_patches_number
 
@@ -30,104 +33,81 @@ def create_objective(
     model_trainer: ModelTrainer,
 ) -> Callable[[Trial], float]:
     def objective(trial: Trial) -> float:
-        use_pos_weight = trial.suggest_categorical(
-            "use_pos_weight",
-            [False, True],
-        )
 
-        heroes_embedding_dim = trial.suggest_categorical(
-            "heroes_embedding_dim",
+        d_model = trial.suggest_categorical(
+            "d_model",
             [
-                4,
                 8,
-                16,
-                32,
-                64,
-            ],
-        )
-        patch_embedding_dim = trial.suggest_categorical(
-            "patch_embedding_dim",
-            [1, 2, 4, 8, 16, 32],
-        )
-        gru_hidden_dim = trial.suggest_categorical(
-            "gru_hidden_dim",
-            [
                 16,
                 32,
                 64,
                 128,
                 256,
-                512,
-                1024,
             ],
         )
-        num_gru_layers = trial.suggest_int("num_gru_layers", 1, 4)
-        bidirectional = trial.suggest_categorical(
-            "bidirectional",
-            [True, False],
+        num_heads = trial.suggest_categorical(
+            "num_heads",
+            [
+                1,
+                2,
+                4,
+                8,
+                16,
+            ],
         )
-
+        num_synergy_layers = trial.suggest_int("num_synergy_layers", 2, 5)
         dropout_rate = trial.suggest_float(
             "dropout_rate",
-            0.3,
-            0.65,
+            0.25,
+            0.55,
+        )
+        patch_embedding_dim = trial.suggest_categorical(
+            "patch_embedding_dim",
+            [
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+            ],
         )
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            4,
-            19,
+            3,
+            15,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            12,
-            26,
+            5,
+            20,
         )
-        num_heads = trial.suggest_categorical("num_heads", [1, 2, 4, 8, 16])
-
-        model_params = NNParameters(
-            num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
-            num_patches=get_patches_number(),
-            heroes_embedding_dim=heroes_embedding_dim,
-            patch_embedding_dim=patch_embedding_dim,
-            gru_hidden_dim=gru_hidden_dim,
-            num_gru_layers=num_gru_layers,
-            dropout_rate=dropout_rate,
-            bidirectional=bidirectional,
-            num_heads=num_heads,
-        )
-        model = RNNWinPredictor(model_params)
-
-        trainable_params = count_trainable_params(model)
-        trial.set_user_attr("model_trainable_params", trainable_params)
 
         training_arguments = TrainingArguments(
             data=TrainingData(
                 train_dataset=model_trainer.data_manager.train_dataset,
                 val_dataset=model_trainer.data_manager.val_dataset,
             ),
-            pos_weight=model_trainer.data_manager.pos_weight
-            if use_pos_weight
-            else None,
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-5, 1e-1, log=True),
+                lr=trial.suggest_float("lr", 1e-7, 1e-3, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
-                    1e-7,
-                    1e-1,
+                    1e-5,
+                    1e1,
                     log=True,
                 ),
             ),
             scheduler_parameters=SchedulerParameters(
                 factor=trial.suggest_float(
                     "factor",
-                    0.6,
-                    0.9,
+                    0.7,
+                    1.0,
                 ),
                 threshold=trial.suggest_float(
                     "threshold",
-                    1e-4,
-                    1,
+                    1e-6,
+                    1e-2,
                     log=True,
                 ),
                 scheduler_patience=scheduler_patience,
@@ -143,8 +123,30 @@ def create_objective(
                     1024,
                 ],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 8, 22),
+            decision_weight=trial.suggest_int("decision_weight", 10, 22),
         )
+
+        if d_model % num_heads != 0:
+            raise optuna.TrialPruned
+
+        model_params = SiameseParameters(
+            num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
+            num_patches=get_patches_number(),
+            d_model=d_model,
+            num_heads=num_heads,
+            num_synergy_layers=num_synergy_layers,
+            dropout_rate=dropout_rate,
+            patch_embedding_dim=patch_embedding_dim,
+        )
+        model = SiameseDraftPredictor(
+            model_params,
+            hero_data_manager.get_projected_hero_embeddings(
+                model_params.d_model,
+            ),
+        )
+
+        trainable_params = count_trainable_params(model)
+        trial.set_user_attr("model_trainable_params", trainable_params)
 
         model_trainer.setup_custom_training(model, training_arguments)
         model_trainer.train_model(
@@ -157,7 +159,7 @@ def create_objective(
             is not None
         )
         return float(
-            model_trainer.training_components.early_stopping.best_metrics.mcc,
+            model_trainer.training_components.early_stopping.best_metrics.loss,
         )
 
     return objective
@@ -170,9 +172,15 @@ def main(csv_file_path: Path) -> None:
     model_trainer = ModelTrainer(csv_file_path)
     objective = create_objective(model_trainer)
 
+    current_date = pd.Timestamp.now().strftime("%Y%m%d")
+    study_name = (
+        f"dota_win_predictor_loss_{current_date}_{uuid.uuid4().hex[:8]}"
+    )
+    logger.info(f"Study name: {study_name}")
+
     study = optuna.create_study(
-        study_name="dota_win_predictor_26_08_2026",
-        direction="maximize",
+        study_name=study_name,
+        direction="minimize",
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
         ),
@@ -181,7 +189,7 @@ def main(csv_file_path: Path) -> None:
             max_resource=75,
             reduction_factor=3,
         ),
-        storage="sqlite:///optuna_study.db",
+        storage=settings.OPTUNA_STORAGE,
         load_if_exists=True,
     )
 

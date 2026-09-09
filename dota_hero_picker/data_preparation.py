@@ -1,119 +1,124 @@
 import logging
 
-import numpy as np
 import pandas as pd
-
-from dota_hero_picker.hero_data_manager import HeroDataManager
-
-from .neural_network import SEQ_LEN
 
 logger = logging.getLogger(__name__)
 
 MAX_PICK = 5
+SLOT_COLUMNS = [
+    "team_pick_1",
+    "team_pick_2",
+    "opp_pick_1",
+    "opp_pick_2",
+    "team_pick_3",
+    "team_pick_4",
+    "opp_pick_3",
+    "opp_pick_4",
+    "team_pick_5",
+]
 
 
 def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
-    results = []
+    augmented_records = []
+
     for _, row in train_dataframe.iterrows():
-        team_picks = row.team_picks
-        opp_picks = row.opponent_picks
-        my_pick = row.picked_hero
-        win = row.win
-        patch_id = row.patch_id
+        # Perspective 1: Team as Ally
+        ally_perspective_picks = [
+            row["team_pick_1"],
+            row["team_pick_2"],
+            row["opp_pick_1"],
+            row["opp_pick_2"],
+            row["team_pick_3"],
+            row["team_pick_4"],
+            row["opp_pick_3"],
+            row["opp_pick_4"],
+            row["team_pick_5"],
+        ]
+        my_picked_hero = row["picked_hero"]
 
-        draft_sequence = (
-            team_picks[:2]
-            + opp_picks[:2]
-            + team_picks[2:4]
-            + opp_picks[2:4]
-            + team_picks[4:]
-        )
-        for index, pick in enumerate(draft_sequence, 1):
-            is_my_decision = int(my_pick == pick)
-            padded_draft_sequence = draft_sequence[:index] + [0] * (
-                SEQ_LEN - index
-            )
-
-            results.append(
+        for draft_step in range(1, len(SLOT_COLUMNS) + 1):
+            prefix_record = {
+                slot_name: (
+                    ally_perspective_picks[slot_index]
+                    if slot_index < draft_step
+                    else None
+                )
+                for slot_index, slot_name in enumerate(SLOT_COLUMNS)
+            }
+            current_hero_pick = ally_perspective_picks[draft_step - 1]
+            prefix_record.update(
                 {
-                    "draft_sequence": padded_draft_sequence,
-                    "win": win,
-                    "is_my_decision": is_my_decision,
-                    "patch_id": patch_id,
+                    "win": row["win"],
+                    "is_my_decision": int(my_picked_hero == current_hero_pick),
+                    "patch_id": row["patch_id"],
                 },
             )
+            augmented_records.append(prefix_record)
 
-        team_picks = row.opponent_picks
-        opp_picks = row.team_picks
-        win = 1 - row.win
-
-        draft_sequence = (
-            team_picks[:2]
-            + opp_picks[:2]
-            + team_picks[2:4]
-            + opp_picks[2:4]
-            + team_picks[4:]
-        )
-        for index, _ in enumerate(draft_sequence, 1):
-            padded_draft_sequence = draft_sequence[:index] + [0] * (
-                SEQ_LEN - index
-            )
-            results.append(
+        opponent_perspective_picks = [
+            row["opp_pick_1"],
+            row["opp_pick_2"],
+            row["team_pick_1"],
+            row["team_pick_2"],
+            row["opp_pick_3"],
+            row["opp_pick_4"],
+            row["team_pick_3"],
+            row["team_pick_4"],
+            row["opp_pick_5"],
+        ]
+        for draft_step in range(1, len(SLOT_COLUMNS) + 1):
+            prefix_record = {
+                slot_name: (
+                    opponent_perspective_picks[slot_index]
+                    if slot_index < draft_step
+                    else None
+                )
+                for slot_index, slot_name in enumerate(SLOT_COLUMNS)
+            }
+            prefix_record.update(
                 {
-                    "draft_sequence": padded_draft_sequence,
-                    "win": win,
+                    "win": 1 - row["win"],
                     "is_my_decision": 0,
-                    "patch_id": patch_id,
+                    "patch_id": row["patch_id"],
                 },
             )
+            augmented_records.append(prefix_record)
 
-    return pd.DataFrame(results)
+    return pd.DataFrame(augmented_records)
 
 
 def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
-    dataframe = dataframe[
-        ["team_picks", "opponent_picks", "picked_hero", "win", "patch_id"]
-    ]
-    prepared_rows = []
+    prepared_records = []
+
     for _, row in dataframe.iterrows():
-        team_picks = row.team_picks
-        opp_picks = row.opponent_picks
-        draft_sequence = (
-            team_picks[:2]
-            + opp_picks[:2]
-            + team_picks[2:4]
-            + opp_picks[2:4]
-            + team_picks[4:]
-        )
-        my_pick_index = draft_sequence.index(row.picked_hero)
-        padded_draft_sequence = draft_sequence[: my_pick_index + 1] + [0] * (
-            SEQ_LEN - my_pick_index - 1
-        )
-        prepared_rows.append(
+        chronological_picks = [
+            row["team_pick_1"],
+            row["team_pick_2"],
+            row["opp_pick_1"],
+            row["opp_pick_2"],
+            row["team_pick_3"],
+            row["team_pick_4"],
+            row["opp_pick_3"],
+            row["opp_pick_4"],
+            row["team_pick_5"],
+        ]
+        my_pick_step = chronological_picks.index(row["picked_hero"]) + 1
+
+        prefix_record = {
+            slot_name: (
+                chronological_picks[slot_index]
+                if slot_index < my_pick_step
+                else None
+            )
+            for slot_index, slot_name in enumerate(SLOT_COLUMNS)
+        }
+        prefix_record.update(
             {
-                "draft_sequence": padded_draft_sequence,
-                "win": row.win,
+                "win": row["win"],
                 "is_my_decision": 1,
-                "patch_id": row.patch_id,
+                "patch_id": row["patch_id"],
             },
         )
+        prepared_records.append(prefix_record)
 
-    return pd.DataFrame(prepared_rows)
-
-
-def enrich_dataframe(
-    dataframe: pd.DataFrame,
-    hero_data_manager: HeroDataManager,
-) -> pd.DataFrame:
-    def get_sequence_features(draft_seq: list[int]) -> np.ndarray:
-        return np.array(
-            [
-                hero_data_manager.get_hero_features(hero_id)
-                for hero_id in draft_seq
-            ],
-        )
-
-    dataframe["hero_features"] = dataframe["draft_sequence"].apply(
-        get_sequence_features,  # type: ignore[arg-type]
-    )
-    return dataframe
+    return pd.DataFrame(prepared_records)
