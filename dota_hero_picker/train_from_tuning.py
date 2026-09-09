@@ -108,10 +108,16 @@ def build_candidate_setup(
         decision_weight=int(trial_row["params_decision_weight"]),
     )
     return (
-        SiameseDraftPredictor(model_params),
+        SiameseDraftPredictor(
+            model_params,
+            model_trainer.hero_data_manager.get_projected_hero_embeddings(
+                model_params.d_model,
+            ),
+        ),
         model_params,
         training_arguments,
     )
+
 
 
 def save_stable_model(

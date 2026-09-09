@@ -1,9 +1,6 @@
 import logging
 
-import numpy as np
 import pandas as pd
-
-from dota_hero_picker.hero_data_manager import HeroDataManager
 
 logger = logging.getLogger(__name__)
 
@@ -125,24 +122,3 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
         prepared_records.append(prefix_record)
 
     return pd.DataFrame(prepared_records)
-
-
-def enrich_dataframe(
-    dataframe: pd.DataFrame,
-    hero_data_manager: HeroDataManager,
-) -> pd.DataFrame:
-    def get_slot_features(row: pd.Series) -> np.ndarray:
-        return np.array(
-            [
-                hero_data_manager.get_hero_features(
-                    int(hero_id) if pd.notna(hero_id) else 0,
-                )
-                for hero_id in row[SLOT_COLUMNS]
-            ],
-        )
-
-    dataframe["hero_features"] = dataframe.apply(
-        get_slot_features,
-        axis=1,
-    )
-    return dataframe

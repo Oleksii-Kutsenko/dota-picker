@@ -46,10 +46,32 @@ Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE 
 Reverted:
 
 Idea: Initialize hero_emb from PCA-projected tabular features (warm-start) and drop runtime tabular concatenation and feature_proj.
-Result: 
+Result:
+2026-09-05 13:31:53,981 - INFO - TOP CANDIDATES RETRAINING BENCHMARK (SEEDS: 42, 123, 999)
+===============================================================================
+Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE | Mean MCC
+-------------------------------------------------------------------------------
+1     | #181    | 0.6187   | 0.5861 (0.0231)    | 0.6791 (0.0059)    | 0.0460   | 0.1527
+2     | #100    | 0.6028   | 0.5796 (0.0081)    | 0.6929 (0.0095)    | 0.0685   | 0.1347
+3     | #169    | 0.6165   | 0.5610 (0.0095)    | 0.6922 (0.0062)    | 0.0520   | 0.0744
+4     | #10     | 0.6106   | 0.5598 (0.0216)    | 0.6971 (0.0110)    | 0.0726   | 0.1046
+5     | #129    | 0.6098   | 0.5571 (0.0018)    | 0.6996 (0.0045)    | 0.0625   | 0.1066
+After:
+2026-09-09 01:53:54,017 - INFO - TOP CANDIDATES RETRAINING BENCHMARK (SEEDS: 42, 123, 999)
+2026-09-09 01:53:54,017 - INFO - ===============================================================================
+2026-09-09 01:53:54,017 - INFO - Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE | Mean MCC
+2026-09-09 01:53:54,017 - INFO - -------------------------------------------------------------------------------
+2026-09-09 01:53:54,017 - INFO - 1     | #25     | 0.6606   | 0.5959 (0.0344)    | 0.6791 (0.0116)    | 0.0428   | 0.1377
+2026-09-09 01:53:54,017 - INFO - 2     | #149    | 0.6655   | 0.5637 (0.0192)    | 0.6878 (0.0041)    | 0.0402   | 0.1162
+2026-09-09 01:53:54,018 - INFO - 3     | #120    | 0.6640   | 0.5573 (0.0212)    | 0.6870 (0.0036)    | 0.0600   | 0.0703
+2026-09-09 01:53:54,018 - INFO - 4     | #5      | 0.6652   | 0.5567 (0.0487)    | 0.6908 (0.0103)    | 0.0559   | 0.0351
+2026-09-09 01:53:54,018 - INFO - 5     | #221    | 0.6642   | 0.5409 (0.0046)    | 0.6940 (0.0062)    | 0.0626   | 0.0169
+
+
+
 
 Idea: Add binary ability indicators (has_stun, has_silence, has_break, has_dispel, has_bkb_pierce, is_illusion) to provide cross-attention with direct mechanics signals.
-Result: 
+Result:
 
 Idea: Add personal comfort features (player_matches_with_hero, player_winrate_with_hero) from match history.
-Result: 
+Result:

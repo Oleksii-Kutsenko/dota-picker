@@ -1,10 +1,9 @@
 from dataclasses import dataclass
 from typing import cast
 
+import numpy as np
 import torch
 from torch import nn
-
-from .hero_data_manager import HeroDataManager
 
 SEQ_LEN = 9
 
@@ -117,7 +116,11 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
     ally_phase_ids: torch.Tensor
     enemy_phase_ids: torch.Tensor
 
-    def __init__(self, params: SiameseParameters) -> None:
+    def __init__(
+        self,
+        params: SiameseParameters,
+        hero_embeddings: np.ndarray,
+    ) -> None:
         super().__init__()
         self.d_model = params.d_model
 
@@ -140,15 +143,10 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
             params.d_model,
         )
 
-        num_tabular_features = len(HeroDataManager.FEATURES)
-        self.feature_proj = nn.Linear(
-            params.d_model + num_tabular_features,
-            params.d_model,
-        )
         self.input_layer_norm = nn.LayerNorm(params.d_model)
         self.input_dropout = nn.Dropout(params.dropout_rate)
 
-        # Slot mappings (based on standard Ranked All Pick flow)
+        # Slot mappings
         self.register_buffer(
             "ally_indices",
             torch.tensor([0, 1, 4, 5, 8], dtype=torch.long),
@@ -157,8 +155,6 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
             "enemy_indices",
             torch.tensor([2, 3, 6, 7], dtype=torch.long),
         )
-        # Draft phases for each team's slots
-        # (1 = Opening, 2 = Mid, 3 = Closing)
         self.register_buffer(
             "ally_phase_ids",
             torch.tensor([1, 1, 2, 2, 3], dtype=torch.long),
@@ -190,6 +186,7 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
         )
 
         self._initialize_weights()
+        self.hero_emb.weight.data.copy_(torch.from_numpy(hero_embeddings))
 
     def _initialize_weights(self) -> None:
         for module in self.modules():
@@ -203,7 +200,6 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
     def _embed_team(
         self,
         hero_ids: torch.Tensor,
-        features: torch.Tensor,
         phase_ids: torch.Tensor,
         patch_shift: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -217,9 +213,8 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
         valid_mask = (~padding_mask).unsqueeze(-1).float()
 
         tokens = hero_vecs + phase_vecs + (patch_shift * valid_mask)
-        fused = self.feature_proj(torch.cat([tokens, features], dim=-1))
-        fused = self.input_dropout(self.input_layer_norm(fused))
-        return fused, padding_mask
+        tokens = self.input_dropout(self.input_layer_norm(tokens))
+        return tokens, padding_mask
 
     def _pool_team(
         self,
@@ -235,7 +230,6 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
     def forward(  # pylint: disable=too-many-locals
         self,
         draft_sequence: torch.Tensor,
-        hero_features: torch.Tensor,
         patch_id: torch.Tensor,
     ) -> torch.Tensor:
         patch_shift = self.patch_to_model(self.patch_emb(patch_id)).unsqueeze(
@@ -244,20 +238,16 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
 
         # 1. Separate Ally & Enemy streams
         ally_heroes = draft_sequence[:, self.ally_indices]
-        ally_feats = hero_features[:, self.ally_indices]
         enemy_heroes = draft_sequence[:, self.enemy_indices]
-        enemy_feats = hero_features[:, self.enemy_indices]
 
         # 2. Embed tokens for each team independently
         ally_tokens, ally_mask = self._embed_team(
             ally_heroes,
-            ally_feats,
             self.ally_phase_ids,
             patch_shift,
         )
         enemy_tokens, enemy_mask = self._embed_team(
             enemy_heroes,
-            enemy_feats,
             self.enemy_phase_ids,
             patch_shift,
         )

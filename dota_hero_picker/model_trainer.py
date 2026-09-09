@@ -79,17 +79,20 @@ class ModelTrainer:
 
     @classmethod
     def create_default_model(cls) -> SiameseDraftPredictor:
-        return SiameseDraftPredictor(
-            SiameseParameters(
-                num_heroes=cls.hero_data_manager.get_heroes_number(),
-                num_patches=get_patches_number(),
-                d_model=16,
-                num_heads=2,
-                num_synergy_layers=3,
-                dropout_rate=0.363054,
-                patch_embedding_dim=32,
-            ),
+        params = SiameseParameters(
+            num_heroes=cls.hero_data_manager.get_heroes_number(),
+            num_patches=get_patches_number(),
+            d_model=16,
+            num_heads=2,
+            num_synergy_layers=3,
+            dropout_rate=0.363054,
+            patch_embedding_dim=32,
         )
+        return SiameseDraftPredictor(
+            params,
+            cls.hero_data_manager.get_projected_hero_embeddings(params.d_model),
+        )
+
 
     def create_default_training_arguments(
         self,

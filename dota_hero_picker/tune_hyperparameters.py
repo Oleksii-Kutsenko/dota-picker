@@ -55,32 +55,32 @@ def create_objective(
                 16,
             ],
         )
-        num_synergy_layers = trial.suggest_int("num_synergy_layers", 1, 4)
+        num_synergy_layers = trial.suggest_int("num_synergy_layers", 2, 5)
         dropout_rate = trial.suggest_float(
             "dropout_rate",
-            0.10,
-            0.40,
+            0.25,
+            0.55,
         )
         patch_embedding_dim = trial.suggest_categorical(
             "patch_embedding_dim",
             [
-                2,
-                4,
                 8,
                 16,
                 32,
                 64,
+                128,
+                256,
             ],
         )
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            5,
+            3,
             15,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            10,
-            25,
+            5,
+            20,
         )
 
         training_arguments = TrainingArguments(
@@ -90,18 +90,18 @@ def create_objective(
             ),
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-7, 1e-2, log=True),
+                lr=trial.suggest_float("lr", 1e-7, 1e-3, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
-                    1e-6,
-                    1e-2,
+                    1e-5,
+                    1e1,
                     log=True,
                 ),
             ),
             scheduler_parameters=SchedulerParameters(
                 factor=trial.suggest_float(
                     "factor",
-                    0.5,
+                    0.7,
                     1.0,
                 ),
                 threshold=trial.suggest_float(
@@ -115,6 +115,7 @@ def create_objective(
             batch_size=trial.suggest_categorical(
                 "batch_size",
                 [
+                    32,
                     64,
                     128,
                     256,
@@ -122,7 +123,7 @@ def create_objective(
                     1024,
                 ],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 10, 24),
+            decision_weight=trial.suggest_int("decision_weight", 10, 22),
         )
 
         if d_model % num_heads != 0:
@@ -137,7 +138,12 @@ def create_objective(
             dropout_rate=dropout_rate,
             patch_embedding_dim=patch_embedding_dim,
         )
-        model = SiameseDraftPredictor(model_params)
+        model = SiameseDraftPredictor(
+            model_params,
+            hero_data_manager.get_projected_hero_embeddings(
+                model_params.d_model,
+            ),
+        )
 
         trainable_params = count_trainable_params(model)
         trial.set_user_attr("model_trainable_params", trainable_params)
@@ -189,7 +195,7 @@ def main(csv_file_path: Path) -> None:
 
     study.optimize(
         objective,
-        n_trials=240,
+        n_trials=250,
         show_progress_bar=True,
     )
     fig = optuna.visualization.plot_optimization_history(study)

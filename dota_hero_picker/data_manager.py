@@ -9,7 +9,6 @@ from dota_hero_picker.hero_data_manager import HeroDataManager
 
 from .data_preparation import (
     create_augmented_dataframe,
-    enrich_dataframe,
     prepare_dataframe,
 )
 from .training_utils import (
@@ -92,30 +91,20 @@ class DataManager:
         )
 
         augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
-        enriched_train_dataframe = enrich_dataframe(
-            augmented_train_dataframe,
-            self.hero_data_manager,
-        )
 
         logger.info(
             f"Size of augmented dataset {len(augmented_train_dataframe)}",
         )
 
-        prepared_validation_dataframe = enrich_dataframe(
-            prepare_dataframe(validation_dataframe),
-            self.hero_data_manager,
-        )
-        prepared_test_dataframe = enrich_dataframe(
-            prepare_dataframe(test_dataframe),
-            self.hero_data_manager,
-        )
+        prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
+        prepared_test_dataframe = prepare_dataframe(test_dataframe)
 
         compute_baseline_f1(
             augmented_train_dataframe["win"],
             prepared_test_dataframe["win"],
         )
 
-        train_dataset = DotaDataset(enriched_train_dataframe)
+        train_dataset = DotaDataset(augmented_train_dataframe)
         val_dataset = DotaDataset(prepared_validation_dataframe)
         test_dataset = DotaDataset(prepared_test_dataframe)
 

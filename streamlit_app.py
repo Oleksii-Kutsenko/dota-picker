@@ -1,50 +1,102 @@
 from pathlib import Path
 
-import numpy as np
+import pandas as pd
 import streamlit as st
 import torch
 
 import settings
-from dota_hero_picker.data_preparation import (
-    MAX_PICK,
-)
-from dota_hero_picker.hero_data_manager import HeroDataManager, hero_positions
+from dota_hero_picker.data_preparation import MAX_PICK
+from dota_hero_picker.hero_data_manager import HeroDataManager
 from dota_hero_picker.neural_network import (
     SiameseDraftPredictor,
     SiameseParameters,
 )
 from dota_hero_picker.patch_resolver import get_latest_patch_id
 
+st.set_page_config(
+    page_title="Dota 2 Draft Assistant",
+    page_icon="⚔️",
+    layout="wide",
+)
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-@st.cache_resource
-def get_model() -> tuple[torch.nn.Module, float]:
-    model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
-
-    checkpoint = torch.load(model_path, map_location=device)
-    temperature = checkpoint["temperature"]
-
-    model_params = SiameseParameters(**checkpoint["model_params"])
-    model = SiameseDraftPredictor(model_params)
-    model.load_state_dict(checkpoint["model_state"])
-    model.to(device)
-    model.eval()
-
-    st.success(
-        f"Model loaded from {model_path} (temperature={temperature:.4f}).",
-    )
-    return model, temperature
-
-
+# =====================================================================
+# Model & Data Loading
+# =====================================================================
 @st.cache_resource
 def get_hero_data_manager() -> HeroDataManager:
     return HeroDataManager()
 
 
+@st.cache_resource
+def get_model() -> tuple[torch.nn.Module, float]:
+    hdm = get_hero_data_manager()
+    model_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
+    if not model_path.exists():
+        st.error(f"Model file not found at {model_path}. Train a model first.")
+        st.stop()
+
+    checkpoint = torch.load(model_path, map_location=device)
+    temperature = float(checkpoint.get("temperature", 1.0))
+
+    model_params = SiameseParameters(**checkpoint["model_params"])
+    model = SiameseDraftPredictor(
+        model_params,
+        hdm.get_projected_hero_embeddings(model_params.d_model),
+    )
+    model.load_state_dict(checkpoint["model_state"], strict=False)
+    model.to(device)
+    model.eval()
+    return model, temperature
+
+
 hero_data_manager = get_hero_data_manager()
-loaded_model, model_temperature = get_model()
+model, temperature = get_model()
 latest_patch_id = get_latest_patch_id()
+
+
+# =====================================================================
+# Helpers
+# =====================================================================
+def get_hero_meta(localized_name: str) -> tuple[str, str]:
+    row = hero_data_manager.processed_heroes.loc[
+        hero_data_manager.processed_heroes["localized_name"] == localized_name
+    ]
+    if row.empty:
+        return "Universal", ""
+    rec = row.iloc[0]
+
+    # Attribute
+    if rec.get("primary_attr_str", 0) == 1:
+        attr = "Strength"
+    elif rec.get("primary_attr_agi", 0) == 1:
+        attr = "Agility"
+    elif rec.get("primary_attr_int", 0) == 1:
+        attr = "Intelligence"
+    else:
+        attr = "Universal"
+
+    # Mechanics
+    mechanics = []
+    flags = [
+        ("has_bkb_pierce", "BKB Pierce"),
+        ("has_break", "Break"),
+        ("has_stun", "Stun"),
+        ("has_silence", "Silence"),
+        ("has_dispel", "Dispel"),
+        ("has_pure_damage", "Pure Dmg"),
+        ("has_root", "Root"),
+        ("is_illusion", "Illusion"),
+        ("has_invis", "Invis"),
+        ("has_heal", "Heal"),
+    ]
+    for key, label in flags:
+        if rec.get(key, 0) == 1:
+            mechanics.append(label)
+
+    return attr, ", ".join(mechanics)
 
 
 def build_draft_sequence(
@@ -77,229 +129,140 @@ def build_draft_sequence(
     )
 
 
-def create_candidates(
+def calculate_baseline_winrate(
     team_picks: list[str],
     opponent_picks: list[str],
-    allowed_positions: list[int],
-) -> list[str]:
-    candidate_heroes = []
+) -> float:
+    if not team_picks and not opponent_picks:
+        return 0.50
+
+    baseline_ids = build_draft_sequence(team_picks, opponent_picks)
+    baseline_tensor = torch.tensor([baseline_ids], dtype=torch.long, device=device)
+    patch_tensor = torch.tensor([latest_patch_id], dtype=torch.long, device=device)
+
+    with torch.no_grad():
+        logits = model(baseline_tensor, patch_tensor)
+        return float(torch.sigmoid(logits / temperature).item())
+
+
+def get_recommendations(
+    team_picks: list[str],
+    opponent_picks: list[str],
+) -> list[dict]:
     already_picked = set(team_picks) | set(opponent_picks)
     all_heroes = hero_data_manager.get_heroes_localized_names()
+    candidates = [h for h in all_heroes if h not in already_picked]
 
-    for localized_name in all_heroes:
-        if localized_name in already_picked:
-            continue
-
-        hero_pos = hero_positions.get(localized_name, [1, 2, 3, 4, 5])
-        if not any(pos in allowed_positions for pos in hero_pos):
-            continue
-
-        candidate_heroes.append(localized_name)
-    return candidate_heroes
-
-
-def suggest_best_picks(
-    model: torch.nn.Module,
-    team_picks: list[str],
-    opponent_picks: list[str],
-    allowed_positions: list[int],
-    temperature: float,
-) -> list[tuple[str, float]]:
-    model.eval()
-
-    candidate_heroes = create_candidates(
-        team_picks,
-        opponent_picks,
-        allowed_positions,
-    )
+    if not candidates:
+        return []
 
     batch_draft_ids = [
-        build_draft_sequence(team_picks, opponent_picks, candidate)
-        for candidate in candidate_heroes
+        build_draft_sequence(team_picks, opponent_picks, c)
+        for c in candidates
     ]
 
-    batch_hero_features = [
-        [
-            hero_data_manager.get_hero_features(draft_id)
-            for draft_id in draft_ids
+    draft_tensor = torch.tensor(batch_draft_ids, dtype=torch.long, device=device)
+    patch_tensor = torch.full(
+        (len(batch_draft_ids),),
+        fill_value=latest_patch_id,
+        dtype=torch.long,
+        device=device,
+    )
+
+    with torch.no_grad():
+        logits = model(draft_tensor, patch_tensor)
+        probs = torch.sigmoid(logits / temperature).cpu().numpy().flatten()
+
+    baseline = calculate_baseline_winrate(team_picks, opponent_picks)
+    results = []
+
+    for hero, prob in zip(candidates, probs, strict=False):
+        attr, mechanics = get_hero_meta(hero)
+        results.append({
+            "Hero": hero,
+            "Attribute": attr,
+            "Win Rate": float(prob),
+            "Impact": float(prob - baseline),
+            "Mechanics": mechanics,
+        })
+
+    results.sort(key=lambda x: x["Win Rate"], reverse=True)
+    return results
+
+
+# =====================================================================
+# UI - Top Compact Draft Setup
+# =====================================================================
+all_heroes = sorted(hero_data_manager.get_heroes_localized_names())
+
+top_col_allies, top_col_enemies, top_col_stat = st.columns([3, 3, 2])
+
+with top_col_allies:
+    team_picks = st.multiselect(
+        "Allies (max 5)",
+        options=all_heroes,
+        max_selections=5,
+        placeholder="Select allies...",
+        key="team_picks_multiselect",
+    )
+
+with top_col_enemies:
+    opp_options = [h for h in all_heroes if h not in team_picks]
+    opponent_picks = st.multiselect(
+        "Enemies (max 5)",
+        options=opp_options,
+        max_selections=5,
+        placeholder="Select enemies...",
+        key="opponent_picks_multiselect",
+    )
+
+with top_col_stat:
+    baseline = calculate_baseline_winrate(team_picks, opponent_picks)
+    delta_val = (baseline - 0.50) * 100
+    delta_str = f"{delta_val:+.1f}% vs 50%" if abs(delta_val) >= 0.3 else "Even (50/50)"
+    st.metric(
+        label="Draft Win Probability",
+        value=f"{baseline * 100:.1f}%",
+        delta=delta_str,
+    )
+
+st.divider()
+
+# =====================================================================
+# UI - Information-Dense Recommendations Table
+# =====================================================================
+if len(team_picks) >= 5:
+    st.info("Your team is full (5/5 heroes picked).")
+else:
+    recs = get_recommendations(team_picks, opponent_picks)
+
+    search_hero = st.text_input(
+        "Search Hero",
+        placeholder="Filter by hero name...",
+        label_visibility="collapsed",
+    )
+    if search_hero.strip():
+        recs = [r for r in recs if search_hero.strip().lower() in r["Hero"].lower()]
+
+    if recs:
+        table_data = [
+            {
+                "Rank": idx + 1,
+                "Hero": r["Hero"],
+                "Win Rate": f"{r['Win Rate'] * 100:.1f}%",
+                "Win Impact": f"{r['Impact'] * 100:+.2f}%",
+                "Attribute": r["Attribute"],
+                "Key Mechanics": r["Mechanics"] if r["Mechanics"] else "—",
+            }
+            for idx, r in enumerate(recs)
         ]
-        for draft_ids in batch_draft_ids
-    ]
+        df = pd.DataFrame(table_data)
 
-    draft_tensor = torch.tensor(
-        batch_draft_ids,
-        dtype=torch.long,
-        device=device,
-    )
-    hero_features_tensor = torch.tensor(
-        np.array(batch_hero_features),
-        dtype=torch.float32,
-        device=device,
-    )
-
-    with torch.no_grad():
-        logits = model(
-            draft_tensor,
-            hero_features_tensor,
-            torch.full(
-                (len(batch_draft_ids),),
-                fill_value=latest_patch_id,
-                dtype=torch.long,
-                device=device,
-            ),
+        st.dataframe(
+            df,
+            width="stretch",
+            hide_index=True,
+            height=650,
         )
-        probabilities = (
-            torch.sigmoid(logits / temperature).cpu().numpy().flatten()
-        )
-
-    results = list(zip(candidate_heroes, probabilities, strict=False))
-
-    results.sort(key=lambda x: x[1], reverse=True)
-    return results[:30]
-
-
-def calculate_baseline_probability(
-    model: torch.nn.Module,
-    team_picks: list[str],
-    opponent_picks: list[str],
-    temperature: float,
-) -> float:
-    baseline_ids = build_draft_sequence(
-        team_picks,
-        opponent_picks,
-    )
-    hero_features = [
-        hero_data_manager.get_hero_features(draft_id)
-        for draft_id in baseline_ids
-    ]
-
-    baseline_tensor = torch.tensor(
-        [baseline_ids],
-        dtype=torch.long,
-        device=device,
-    )
-    hero_features_tensor = torch.tensor(
-        np.array([hero_features]),
-        dtype=torch.float32,
-        device=device,
-    )
-    patch_tensor = torch.tensor(
-        [latest_patch_id],
-        dtype=torch.long,
-        device=device,
-    )
-
-    with torch.no_grad():
-        baseline_logits = model(
-            baseline_tensor,
-            hero_features_tensor,
-            patch_tensor,
-        )
-        return torch.sigmoid(baseline_logits / temperature).item()
-
-
-st.title("Dota Picker Web UI")
-st.header("Draft Setup")
-
-if "team_picks" not in st.session_state:
-    st.session_state.team_picks = []
-if "opponent_picks" not in st.session_state:
-    st.session_state.opponent_picks = []
-
-
-def on_team_change() -> None:
-    st.session_state.team_picks = st.session_state.team_picks_widget
-    st.session_state.opponent_picks = [
-        h
-        for h in st.session_state.opponent_picks
-        if h not in st.session_state.team_picks
-    ]
-
-
-def on_opponent_change() -> None:
-    st.session_state.opponent_picks = st.session_state.opponent_picks_widget
-    st.session_state.team_picks = [
-        h
-        for h in st.session_state.team_picks
-        if h not in st.session_state.opponent_picks
-    ]
-
-
-all_hero_names = hero_data_manager.get_heroes_localized_names()
-
-team_options = [
-    h for h in all_hero_names if h not in st.session_state.opponent_picks
-]
-opponent_options = [
-    h for h in all_hero_names if h not in st.session_state.team_picks
-]
-
-team_picks_multiselect = st.multiselect(
-    "Your Team Picks (up to 5)",
-    options=team_options,
-    max_selections=5,
-    default=st.session_state.team_picks,
-    key="team_picks_widget",
-    on_change=on_team_change,
-)
-
-opponent_picks_multiselect = st.multiselect(
-    "Opponent Team Picks (up to 5)",
-    options=opponent_options,
-    max_selections=5,
-    default=st.session_state.opponent_picks,
-    key="opponent_picks_widget",
-    on_change=on_opponent_change,
-)
-
-st.sidebar.header("Filter Suggestions by Position")
-position_options = [1, 2, 3, 4, 5]
-position_to_name = {
-    1: "Carry",
-    2: "Mid",
-    3: "Offlane",
-    4: "Roaming Support",
-    5: "Hard Support",
-}
-selected_positions: list[int] = st.sidebar.multiselect(
-    "Allowed Positions (select none for all)",
-    options=position_options,
-    format_func=lambda p: f"{p} ({position_to_name[p]})",
-    default=position_options,
-)
-
-
-if st.button("Get Suggestions"):
-    allowed = selected_positions if selected_positions else position_options
-    suggestions = suggest_best_picks(
-        loaded_model,
-        team_picks_multiselect,
-        opponent_picks_multiselect,
-        allowed,
-        model_temperature,
-    )
-    st.subheader("Top Suggested Picks (as next team pick)")
-
-    baseline_prob = calculate_baseline_probability(
-        loaded_model,
-        team_picks_multiselect,
-        opponent_picks_multiselect,
-        model_temperature,
-    )
-
-    st.metric(
-        "Baseline Win Prob (no new pick)",
-        f"{baseline_prob * 100:.2f}%",
-    )
-    st.divider()
-
-    top_hero, top_prob = suggestions[0]
-    st.metric(
-        label=f"#1 Suggestion: {top_hero}",
-        value=f"{top_prob * 100:.2f}%",
-        delta=f"{(top_prob - baseline_prob) * 100:.2f}%",
-        delta_color="normal",
-    )
-
-    for idx, (hero, probability) in enumerate(suggestions[1:], 2):
-        st.write(f"#{idx} {hero} (Win Prob: {probability * 100:.2f}%)")
+    else:
+        st.warning("No heroes found.")
