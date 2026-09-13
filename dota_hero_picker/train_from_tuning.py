@@ -13,8 +13,11 @@ import torch
 import settings
 from dota_hero_picker.model_trainer import ModelTrainer
 from dota_hero_picker.neural_network import (
+    DataDimensions,
+    MatchupParameters,
     SiameseDraftPredictor,
     SiameseParameters,
+    SynergyParameters,
 )
 from dota_hero_picker.patch_resolver import get_patches_number
 from dota_hero_picker.training_utils import (
@@ -79,11 +82,20 @@ def build_candidate_setup(
 ) -> tuple[SiameseDraftPredictor, SiameseParameters, TrainingArguments]:
     """Convert an Optuna trial row into Model and TrainingArguments."""
     model_params = SiameseParameters(
-        num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
-        num_patches=get_patches_number(),
+        data_dimensions=DataDimensions(
+            num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
+            num_patches=get_patches_number(),
+        ),
+        synergy_parameters=SynergyParameters(
+            num_heads=int(trial_row["params_num_heads"]),
+            num_layers=int(trial_row["params_num_synergy_layers"]),
+            ffn_ratio=int(trial_row["params_ffn_ratio"]),
+        ),
+        matchup_parameters=MatchupParameters(
+            num_heads=int(trial_row["params_num_heads"]),
+            num_layers=int(trial_row["params_num_matchup_layers"]),
+        ),
         d_model=int(trial_row["params_d_model"]),
-        num_heads=int(trial_row["params_num_heads"]),
-        num_synergy_layers=int(trial_row["params_num_synergy_layers"]),
         dropout_rate=float(trial_row["params_dropout_rate"]),
         patch_embedding_dim=int(trial_row["params_patch_embedding_dim"]),
     )
@@ -110,14 +122,11 @@ def build_candidate_setup(
     return (
         SiameseDraftPredictor(
             model_params,
-            model_trainer.hero_data_manager.get_projected_hero_embeddings(
-                model_params.d_model,
-            ),
+            model_trainer.hero_data_manager.get_hero_features_matrix(),
         ),
         model_params,
         training_arguments,
     )
-
 
 
 def save_stable_model(

@@ -12,8 +12,11 @@ from dota_hero_picker.hero_data_manager import HeroDataManager
 
 from .data_manager import DataManager
 from .neural_network import (
+    DataDimensions,
+    MatchupParameters,
     SiameseDraftPredictor,
     SiameseParameters,
+    SynergyParameters,
 )
 from .patch_resolver import get_patches_number
 from .training_utils import (
@@ -80,19 +83,27 @@ class ModelTrainer:
     @classmethod
     def create_default_model(cls) -> SiameseDraftPredictor:
         params = SiameseParameters(
-            num_heroes=cls.hero_data_manager.get_heroes_number(),
-            num_patches=get_patches_number(),
+            data_dimensions=DataDimensions(
+                num_heroes=cls.hero_data_manager.get_heroes_number(),
+                num_patches=get_patches_number(),
+            ),
+            synergy_parameters=SynergyParameters(
+                num_heads=2,
+                num_layers=3,
+                ffn_ratio=2,
+            ),
+            matchup_parameters=MatchupParameters(
+                num_heads=2,
+                num_layers=1,
+            ),
             d_model=16,
-            num_heads=2,
-            num_synergy_layers=3,
             dropout_rate=0.363054,
             patch_embedding_dim=32,
         )
         return SiameseDraftPredictor(
             params,
-            cls.hero_data_manager.get_projected_hero_embeddings(params.d_model),
+            cls.hero_data_manager.get_hero_features_matrix(),
         )
-
 
     def create_default_training_arguments(
         self,

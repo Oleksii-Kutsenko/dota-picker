@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, Self, cast
 
 import numpy as np
 import torch
@@ -9,16 +9,44 @@ SEQ_LEN = 9
 
 
 @dataclass
-class SiameseParameters:
-    """Parameters for Dual-Stream Siamese Draft Network."""
-
+class DataDimensions:
     num_heroes: int
     num_patches: int
-    d_model: int = 32
+    num_features: int = 45
+
+
+@dataclass
+class SynergyParameters:
     num_heads: int = 4
-    num_synergy_layers: int = 1
+    num_layers: int = 1
+    ffn_ratio: int = 2
+
+
+@dataclass
+class MatchupParameters:
+    num_heads: int = 4
+    num_layers: int = 1
+
+
+@dataclass
+class SiameseParameters:
+    data_dimensions: DataDimensions
+    synergy_parameters: SynergyParameters
+    matchup_parameters: MatchupParameters
+    d_model: int = 32
     dropout_rate: float = 0.2
     patch_embedding_dim: int = 8
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        return cls(
+            data_dimensions=DataDimensions(**data["data_dimensions"]),
+            synergy_parameters=SynergyParameters(**data["synergy_parameters"]),
+            matchup_parameters=MatchupParameters(**data["matchup_parameters"]),
+            d_model=data["d_model"],
+            dropout_rate=data["dropout_rate"],
+            patch_embedding_dim=data["patch_embedding_dim"],
+        )
 
 
 class TeamSynergyBlock(nn.Module):
@@ -30,15 +58,14 @@ class TeamSynergyBlock(nn.Module):
     def __init__(
         self,
         d_model: int,
-        num_heads: int,
-        num_layers: int,
+        params: SynergyParameters,
         dropout: float,
     ) -> None:
         super().__init__()
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
-            nhead=num_heads,
-            dim_feedforward=d_model * 2,
+            nhead=params.num_heads,
+            dim_feedforward=d_model * params.ffn_ratio,
             dropout=dropout,
             activation="gelu",
             batch_first=True,
@@ -46,7 +73,7 @@ class TeamSynergyBlock(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
-            num_layers=num_layers,
+            num_layers=params.num_layers,
             enable_nested_tensor=False,
         )
 
@@ -65,9 +92,7 @@ class TeamSynergyBlock(nn.Module):
         )
 
 
-class MatchupCrossAttention(nn.Module):
-    """Cross-Attention block to model counter-picking and lane matchups."""
-
+class MatchupCrossAttentionLayer(nn.Module):
     def __init__(self, d_model: int, num_heads: int, dropout: float) -> None:
         super().__init__()
         self.cross_attn = nn.MultiheadAttention(
@@ -86,11 +111,7 @@ class MatchupCrossAttention(nn.Module):
         key_padding_mask: torch.Tensor,
     ) -> torch.Tensor:
         all_masked = key_padding_mask.all(dim=1, keepdim=True)
-        safe_mask = torch.where(
-            all_masked,
-            False,  # noqa: FBT003
-            key_padding_mask,
-        )
+        safe_mask = torch.where(all_masked, False, key_padding_mask)  # noqa: FBT003
         attn_out, _ = self.cross_attn(
             query=query_team,
             key=key_team,
@@ -98,9 +119,7 @@ class MatchupCrossAttention(nn.Module):
             key_padding_mask=safe_mask,
         )
         attn_out = torch.where(
-            all_masked.unsqueeze(-1),
-            torch.zeros_like(attn_out),
-            attn_out,
+            all_masked.unsqueeze(-1), torch.zeros_like(attn_out), attn_out,
         )
         return cast(
             "torch.Tensor",
@@ -108,9 +127,41 @@ class MatchupCrossAttention(nn.Module):
         )
 
 
-class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-attributes
-    """Dual-Stream Siamese Network for zero-sum Dota 2 draft win prediction."""
+class MatchupCrossAttention(nn.Module):
+    """Cross-Attention block to model counter-picking and lane matchups."""
 
+    def __init__(
+        self,
+        d_model: int,
+        params: MatchupParameters,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [
+                MatchupCrossAttentionLayer(
+                    d_model=d_model,
+                    num_heads=params.num_heads,
+                    dropout=dropout,
+                )
+                for _ in range(params.num_layers)
+            ],
+        )
+
+    def forward(
+        self,
+        query_team: torch.Tensor,
+        key_team: torch.Tensor,
+        key_padding_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        out = query_team
+        for layer in self.layers:
+            out = layer(out, key_team, key_padding_mask)
+        return out
+
+
+class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-attributes
+    hero_features: torch.Tensor
     ally_indices: torch.Tensor
     enemy_indices: torch.Tensor
     ally_phase_ids: torch.Tensor
@@ -119,23 +170,29 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
     def __init__(
         self,
         params: SiameseParameters,
-        hero_embeddings: np.ndarray,
+        hero_features_matrix: np.ndarray,
     ) -> None:
         super().__init__()
         self.d_model = params.d_model
 
-        # --- 1. Embeddings ---
-        self.hero_emb = nn.Embedding(
-            params.num_heroes + 1,
+        self.register_buffer(
+            "hero_features",
+            torch.from_numpy(hero_features_matrix).float(),
+        )
+        self.stat_proj = nn.Sequential(
+            nn.Linear(params.data_dimensions.num_features, params.d_model),
+            nn.GELU(),
+            nn.Linear(params.d_model, params.d_model),
+        )
+        self.hero_residual = nn.Embedding(
+            params.data_dimensions.num_heroes + 1,
             params.d_model,
             padding_idx=0,
         )
-        self.phase_emb = nn.Embedding(
-            4,  # Phase 1, Phase 2, Phase 3
-            params.d_model,
-        )
+
+        self.phase_emb = nn.Embedding(4, params.d_model)
         self.patch_emb = nn.Embedding(
-            params.num_patches + 1,
+            params.data_dimensions.num_patches + 1,
             params.patch_embedding_dim,
         )
         self.patch_to_model = nn.Linear(
@@ -143,10 +200,10 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
             params.d_model,
         )
 
+        self.hero_norm = nn.LayerNorm(params.d_model)
         self.input_layer_norm = nn.LayerNorm(params.d_model)
         self.input_dropout = nn.Dropout(params.dropout_rate)
 
-        # Slot mappings
         self.register_buffer(
             "ally_indices",
             torch.tensor([0, 1, 4, 5, 8], dtype=torch.long),
@@ -157,27 +214,30 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
         )
         self.register_buffer(
             "ally_phase_ids",
-            torch.tensor([1, 1, 2, 2, 3], dtype=torch.long),
+            torch.tensor(
+                [1, 1, 2, 2, 3],
+                dtype=torch.long,
+            ),
         )
         self.register_buffer(
             "enemy_phase_ids",
-            torch.tensor([1, 1, 2, 2], dtype=torch.long),
+            torch.tensor(
+                [1, 1, 2, 2],
+                dtype=torch.long,
+            ),
         )
 
-        # --- 2. Synergy and Matchup Blocks ---
         self.synergy_block = TeamSynergyBlock(
             d_model=params.d_model,
-            num_heads=params.num_heads,
-            num_layers=params.num_synergy_layers,
+            params=params.synergy_parameters,
             dropout=params.dropout_rate,
         )
         self.matchup_block = MatchupCrossAttention(
             d_model=params.d_model,
-            num_heads=params.num_heads,
+            params=params.matchup_parameters,
             dropout=params.dropout_rate,
         )
 
-        # --- 3. Siamese Team Power Scorer ---
         self.team_scorer = nn.Sequential(
             nn.Linear(params.d_model, params.d_model),
             nn.GELU(),
@@ -186,7 +246,7 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
         )
 
         self._initialize_weights()
-        self.hero_emb.weight.data.copy_(torch.from_numpy(hero_embeddings))
+        nn.init.zeros_(self.hero_residual.weight)
 
     def _initialize_weights(self) -> None:
         for module in self.modules():
@@ -206,7 +266,11 @@ class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-att
         batch_size, _ = hero_ids.shape
         padding_mask = hero_ids == 0
 
-        hero_vecs = self.hero_emb(hero_ids)
+        raw_stats = self.hero_features[hero_ids]
+        base_stats_vec = self.stat_proj(raw_stats)
+        residual_vec = self.hero_residual(hero_ids)
+        hero_vecs = self.hero_norm(base_stats_vec + residual_vec)
+
         phase_vecs = (
             self.phase_emb(phase_ids).unsqueeze(0).expand(batch_size, -1, -1)
         )

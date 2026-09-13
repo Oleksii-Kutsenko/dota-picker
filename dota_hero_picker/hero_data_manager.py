@@ -6,7 +6,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import requests
-from sklearn.decomposition import PCA
 from sklearn.preprocessing import MultiLabelBinarizer, StandardScaler
 
 from manage import DotaPickerError
@@ -160,7 +159,7 @@ def check_is_illusion(ability: dict[str, Any]) -> bool:
             key = attribute_entry.get("key", "").lower()
             header = attribute_entry.get("header", "").lower()
             if (
-                "illusion_duration" in key
+                "illusion_duration" in key  # pylint: disable=too-many-boolean-expressions
                 or "duration_illusion" in key
                 or "illusion_damage" in key
                 or "illusion_count" in key
@@ -494,33 +493,13 @@ class HeroDataManager:
         ].iloc[0]
         return int(hero_row["hero_id"])
 
-    def get_projected_hero_embeddings(self, embedding_dim: int) -> np.ndarray:
+    def get_hero_features_matrix(self) -> np.ndarray:
         num_heroes = self.get_heroes_number()
         num_features = len(self.FEATURES)
-
-        # Build feature matrix (index 0 is padding)
         feature_matrix = np.zeros(
             (num_heroes + 1, num_features),
             dtype=np.float32,
         )
         for hero_id in range(1, num_heroes + 1):
             feature_matrix[hero_id] = self.get_hero_features(hero_id)
-
-        # Fit PCA on actual heroes (rows 1:), not padding
-        num_components = min(embedding_dim, num_features)
-        pca = PCA(n_components=num_components, random_state=42)
-        projected_heroes = pca.fit_transform(feature_matrix[1:])
-        embeddings = np.zeros(
-            (num_heroes + 1, embedding_dim),
-            dtype=np.float32,
-        )
-        embeddings[1:, :num_components] = projected_heroes
-
-        # Scale non-padding vectors to standard initialization variance
-        std = embeddings[1:].std()
-        if std > 0:
-            embeddings[1:] = (embeddings[1:] / std) * (
-                1.0 / np.sqrt(embedding_dim)
-            )
-
-        return embeddings
+        return feature_matrix

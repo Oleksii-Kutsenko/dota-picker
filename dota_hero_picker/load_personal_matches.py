@@ -228,7 +228,7 @@ def fetch_and_save_new_decisions(
 
     response = requests.get(
         API_MATCHES_ENDPOINT.format(account_id),
-        timeout=5,
+        timeout=30,
     )
     if response.status_code != HTTPStatus.OK:
         msg = f"API error: {response.status_code}"

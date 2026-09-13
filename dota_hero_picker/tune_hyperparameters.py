@@ -19,8 +19,11 @@ from dota_hero_picker.training_utils import (
 
 from .model_trainer import ModelTrainer
 from .neural_network import (
+    DataDimensions,
+    MatchupParameters,
     SiameseDraftPredictor,
     SiameseParameters,
+    SynergyParameters,
 )
 from .patch_resolver import get_patches_number
 
@@ -37,12 +40,14 @@ def create_objective(
         d_model = trial.suggest_categorical(
             "d_model",
             [
+                4,
                 8,
                 16,
                 32,
                 64,
                 128,
                 256,
+                512,
             ],
         )
         num_heads = trial.suggest_categorical(
@@ -52,36 +57,37 @@ def create_objective(
                 2,
                 4,
                 8,
-                16,
             ],
         )
-        num_synergy_layers = trial.suggest_int("num_synergy_layers", 2, 5)
+        num_synergy_layers = trial.suggest_int("num_synergy_layers", 2, 7)
         dropout_rate = trial.suggest_float(
             "dropout_rate",
             0.25,
-            0.55,
+            0.45,
         )
         patch_embedding_dim = trial.suggest_categorical(
             "patch_embedding_dim",
             [
-                8,
                 16,
                 32,
                 64,
                 128,
                 256,
+                512,
             ],
         )
+        ffn_ratio = trial.suggest_categorical("ffn_ratio", [1, 2, 4, 8, 16])
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            3,
+            5,
             15,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            5,
-            20,
+            6,
+            17,
         )
+        num_matchup_layers = trial.suggest_int("num_matchup_layers", 1, 4)
 
         training_arguments = TrainingArguments(
             data=TrainingData(
@@ -90,24 +96,24 @@ def create_objective(
             ),
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-7, 1e-3, log=True),
+                lr=trial.suggest_float("lr", 1e-6, 1e-2, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
-                    1e-5,
-                    1e1,
+                    1e-4,
+                    1e-1,
                     log=True,
                 ),
             ),
             scheduler_parameters=SchedulerParameters(
                 factor=trial.suggest_float(
                     "factor",
-                    0.7,
-                    1.0,
+                    0.6,
+                    0.8,
                 ),
                 threshold=trial.suggest_float(
                     "threshold",
-                    1e-6,
-                    1e-2,
+                    1e-5,
+                    1e-4,
                     log=True,
                 ),
                 scheduler_patience=scheduler_patience,
@@ -121,28 +127,36 @@ def create_objective(
                     256,
                     512,
                     1024,
+                    2048,
                 ],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 10, 22),
+            decision_weight=trial.suggest_int("decision_weight", 13, 23),
         )
 
         if d_model % num_heads != 0:
             raise optuna.TrialPruned
 
         model_params = SiameseParameters(
-            num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
-            num_patches=get_patches_number(),
+            data_dimensions=DataDimensions(
+                num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
+                num_patches=get_patches_number(),
+            ),
+            synergy_parameters=SynergyParameters(
+                num_heads=num_heads,
+                num_layers=num_synergy_layers,
+                ffn_ratio=ffn_ratio,
+            ),
+            matchup_parameters=MatchupParameters(
+                num_heads=num_heads,
+                num_layers=num_matchup_layers,
+            ),
             d_model=d_model,
-            num_heads=num_heads,
-            num_synergy_layers=num_synergy_layers,
             dropout_rate=dropout_rate,
             patch_embedding_dim=patch_embedding_dim,
         )
         model = SiameseDraftPredictor(
             model_params,
-            hero_data_manager.get_projected_hero_embeddings(
-                model_params.d_model,
-            ),
+            hero_data_manager.get_hero_features_matrix(),
         )
 
         trainable_params = count_trainable_params(model)
@@ -184,10 +198,10 @@ def main(csv_file_path: Path) -> None:
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
         ),
-        pruner=optuna.pruners.HyperbandPruner(
-            min_resource=8,
-            max_resource=75,
-            reduction_factor=3,
+        pruner=optuna.pruners.MedianPruner(
+            n_startup_trials=10,
+            n_warmup_steps=12,
+            interval_steps=1,
         ),
         storage=settings.OPTUNA_STORAGE,
         load_if_exists=True,

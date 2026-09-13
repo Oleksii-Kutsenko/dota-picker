@@ -4,7 +4,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Self
 
 import numpy as np
 import pandas as pd
@@ -18,14 +18,10 @@ from torch.amp import GradScaler
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics import MetricCollection
 from torchmetrics.classification import (
-    BinaryAccuracy,
     BinaryAUROC,
     BinaryCalibrationError,
     BinaryConfusionMatrix,
-    BinaryF1Score,
     BinaryMatthewsCorrCoef,
-    BinaryPrecision,
-    BinaryRecall,
 )
 
 from dota_hero_picker.data_preparation import SLOT_COLUMNS
@@ -45,10 +41,6 @@ def count_trainable_params(model: nn.Module) -> int:
 def get_metrics_collection() -> MetricCollection:
     return MetricCollection(
         {
-            "accuracy": BinaryAccuracy(),
-            "precision": BinaryPrecision(),
-            "recall": BinaryRecall(),
-            "f1": BinaryF1Score(),
             "auc": BinaryAUROC(),
             "mcc": BinaryMatthewsCorrCoef(),
             "ece": BinaryCalibrationError(n_bins=10, norm="l1"),
@@ -128,20 +120,28 @@ def get_data_loader(
 @dataclass
 class MetricsResult:
     loss: float
-    accuracy: float
-    precision: float
-    recall: float
-    f1: float
     auc: float
-    mcc: float
+    mcc: float = 0.0
     ece: float = 0.0
     confusion_matrix: np.ndarray | None = None
 
+    @classmethod
+    def from_collection(
+        cls,
+        loss: float,
+        results: dict[str, torch.Tensor],
+    ) -> Self:
+        return cls(
+            loss=loss,
+            auc=results["auc"].item(),
+            mcc=results["mcc"].item(),
+            ece=results["ece"].item() if "ece" in results else 0.0,
+            confusion_matrix=results["confusion_matrix"].cpu().numpy(),
+        )
+
     def __str__(self) -> str:
         return (
-            f"Loss: {self.loss:.4f}, Acc: {self.accuracy:.4f}, "
-            f"Prec: {self.precision:.4f}, Rec: {self.recall:.4f}, "
-            f"F1: {self.f1:.4f}, AUC: {self.auc:.4f}, "
+            f"Loss: {self.loss:.4f}, AUC: {self.auc:.4f}, "
             f"MCC: {self.mcc:.4f}, ECE: {self.ece:.4f}"
         )
 
@@ -270,50 +270,26 @@ def evaluate_model(
     temperature: float,
 ) -> tuple[MetricsResult, np.ndarray]:
     model.eval()
-
-    total_loss = torch.tensor(0.0, device=device)
-
+    total_loss, total_samples = 0.0, 0
     metrics_collection = get_metrics_collection()
-    total_samples = 0
     all_probs_tensors: list[torch.Tensor] = []
 
     with torch.no_grad():
-        for batch_data in loader:
-            (
-                draft_sequence,
-                patch_id,
-                is_win,
-                _,
-            ) = batch_data
-
-            outputs = model(draft_sequence, patch_id)
-
-            scaled_outputs = outputs.float() / temperature
-            per_sample_loss = criterion(scaled_outputs, is_win)
-
-            total_loss += per_sample_loss.sum()
+        for draft_seq, patch_id, is_win, _ in loader:
+            scaled = model(draft_seq, patch_id).float() / temperature
+            total_loss += criterion(scaled, is_win).sum().item()
             total_samples += is_win.numel()
 
-            probs = torch.sigmoid(scaled_outputs)
+            probs = torch.sigmoid(scaled)
             all_probs_tensors.append(probs)
             metrics_collection.update(probs, is_win)
 
-    avg_loss = (total_loss / total_samples).item()
     all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
-    results = metrics_collection.compute()
-
-    metrics = MetricsResult(
-        loss=avg_loss,
-        accuracy=results["accuracy"].item(),
-        precision=results["precision"].item(),
-        recall=results["recall"].item(),
-        f1=results["f1"].item(),
-        auc=results["auc"].item(),
-        mcc=results["mcc"].item(),
-        ece=results["ece"].item(),
-        confusion_matrix=results["confusion_matrix"].cpu().numpy(),
-    )
-    return metrics, all_probs
+    avg_loss = total_loss / total_samples
+    return MetricsResult.from_collection(
+        avg_loss,
+        metrics_collection.compute(),
+    ), all_probs
 
 
 def train_step(
@@ -345,20 +321,11 @@ def train_step(
 
     all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
 
-    results = metrics_collection.compute()
-
-    metrics = MetricsResult(
-        loss=torch.stack(all_losses).mean().item(),
-        accuracy=results["accuracy"].item(),
-        precision=results["precision"].item(),
-        recall=results["recall"].item(),
-        f1=results["f1"].item(),
-        auc=results["auc"].item(),
-        mcc=results["mcc"].item(),
-        confusion_matrix=results["confusion_matrix"].cpu().numpy(),
-    )
-
-    return metrics, all_probs
+    avg_loss = torch.stack(all_losses).mean().item()
+    return MetricsResult.from_collection(
+        avg_loss,
+        metrics_collection.compute(),
+    ), all_probs
 
 
 @dataclass

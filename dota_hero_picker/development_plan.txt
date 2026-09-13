@@ -57,21 +57,46 @@ Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE 
 4     | #10     | 0.6106   | 0.5598 (0.0216)    | 0.6971 (0.0110)    | 0.0726   | 0.1046
 5     | #129    | 0.6098   | 0.5571 (0.0018)    | 0.6996 (0.0045)    | 0.0625   | 0.1066
 After:
-2026-09-09 01:53:54,017 - INFO - TOP CANDIDATES RETRAINING BENCHMARK (SEEDS: 42, 123, 999)
-2026-09-09 01:53:54,017 - INFO - ===============================================================================
-2026-09-09 01:53:54,017 - INFO - Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE | Mean MCC
-2026-09-09 01:53:54,017 - INFO - -------------------------------------------------------------------------------
-2026-09-09 01:53:54,017 - INFO - 1     | #25     | 0.6606   | 0.5959 (0.0344)    | 0.6791 (0.0116)    | 0.0428   | 0.1377
-2026-09-09 01:53:54,017 - INFO - 2     | #149    | 0.6655   | 0.5637 (0.0192)    | 0.6878 (0.0041)    | 0.0402   | 0.1162
-2026-09-09 01:53:54,018 - INFO - 3     | #120    | 0.6640   | 0.5573 (0.0212)    | 0.6870 (0.0036)    | 0.0600   | 0.0703
-2026-09-09 01:53:54,018 - INFO - 4     | #5      | 0.6652   | 0.5567 (0.0487)    | 0.6908 (0.0103)    | 0.0559   | 0.0351
-2026-09-09 01:53:54,018 - INFO - 5     | #221    | 0.6642   | 0.5409 (0.0046)    | 0.6940 (0.0062)    | 0.0626   | 0.0169
-
-
-
-
-Idea: Add binary ability indicators (has_stun, has_silence, has_break, has_dispel, has_bkb_pierce, is_illusion) to provide cross-attention with direct mechanics signals.
-Result:
+===============================================================================
+Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE | Mean MCC
+-------------------------------------------------------------------------------
+1     | #25     | 0.6606   | 0.5959 (0.0344)    | 0.6791 (0.0116)    | 0.0428   | 0.1377
+2     | #149    | 0.6655   | 0.5637 (0.0192)    | 0.6878 (0.0041)    | 0.0402   | 0.1162
+3     | #120    | 0.6640   | 0.5573 (0.0212)    | 0.6870 (0.0036)    | 0.0600   | 0.0703
+4     | #5      | 0.6652   | 0.5567 (0.0487)    | 0.6908 (0.0103)    | 0.0559   | 0.0351
+5     | #221    | 0.6642   | 0.5409 (0.0046)    | 0.6940 (0.0062)    | 0.0626   | 0.0169
 
 Idea: Add personal comfort features (player_matches_with_hero, player_winrate_with_hero) from match history.
 Result:
+
+Idea: Stat-Projected Residual Embeddings
+Before:
+===============================================================================
+Rank  | Trial   | Optuna   | Mean AUC (std)     | Mean Loss (std)    | Mean ECE | Mean MCC
+-------------------------------------------------------------------------------
+1     | #25     | 0.6606   | 0.5959 (0.0344)    | 0.6791 (0.0116)    | 0.0428   | 0.1377
+2     | #149    | 0.6655   | 0.5637 (0.0192)    | 0.6878 (0.0041)    | 0.0402   | 0.1162
+3     | #120    | 0.6640   | 0.5573 (0.0212)    | 0.6870 (0.0036)    | 0.0600   | 0.0703
+4     | #5      | 0.6652   | 0.5567 (0.0487)    | 0.6908 (0.0103)    | 0.0559   | 0.0351
+5     | #221    | 0.6642   | 0.5409 (0.0046)    | 0.6940 (0.0062)    | 0.0626   | 0.0169
+After:
+
+
+1. Transformer Architecture
+activation: Currently fixed to GELU. Options: GELU, ReLU, SiLU. Changes the non-linear activation across transformer layers and MLP heads.
+norm_first: Currently fixed to True (Pre-LN). Options: True (Pre-LN) or False (Post-LN). Changes whether LayerNorm is applied before or after attention/FFN blocks.
+attention_dropout: Currently tied to the general dropout_rate. Options: separate float 0.0 to 0.3. Drops attention weights specifically, independent of feature dropout.
+team_scorer_layers: Currently fixed to 2 layers (Linear -> GELU -> Dropout -> Linear). Options: 1 (single linear projection) vs 2 (MLP).
+pooling_type: Currently fixed to Masked Mean Pooling. Options: mean, attention pooling, max pooling. Changes how 5 hero tokens are aggregated into a single team vector.
+2. Optimizer (AdamW)
+beta2: Currently default 0.999. Options: 0.98, 0.99, 0.999. Second-moment tracking; lower values often stabilize Transformer training.
+eps: Currently default 1e-8. Options: 1e-8, 1e-6. Numerical stability constant for denominator normalization in AdamW.
+weight_decay_exclusions: Currently applies weight decay to all parameters. Options: True/False. Standard Transformer practice skips weight decay on LayerNorms, biases, and embedding tables.
+3. Training & Schedule
+warmup_epochs: Currently 0 (starts immediately at full lr). Options: 1 to 5 epochs. Linearly ramps learning rate from 0 to peak lr to protect early weights.
+scheduler_type: Currently fixed to ReduceLROnPlateau. Options: ReduceLROnPlateau, CosineAnnealingLR. Changes between discrete metric-step drops and continuous cosine decay.
+min_lr: Currently 0.0. Options: 1e-7 to 1e-5. Sets an absolute floor below which learning rate will not drop.
+max_grad_norm: Currently fixed to 1.0. Options: 0.5, 1.0, 2.0, 5.0. Controls gradient clipping threshold to prevent exploding gradients.
+4. Loss & Targets
+label_smoothing: Currently 0.0 (hard targets 0 and 1). Options: 0.01 to 0.08. Softens targets to account for match outcome noise and reduce calibration error (ECE).
+loss_type: Currently BCEWithLogitsLoss. Options: BCE, FocalLoss. Focal loss adds a gamma parameter (1.0 to 3.0) to focus training on close, contested drafts.

@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -22,9 +23,6 @@ st.set_page_config(
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# =====================================================================
-# Model & Data Loading
-# =====================================================================
 @st.cache_resource
 def get_hero_data_manager() -> HeroDataManager:
     return HeroDataManager()
@@ -39,17 +37,17 @@ def get_model() -> tuple[torch.nn.Module, float]:
         st.stop()
 
     checkpoint = torch.load(model_path, map_location=device)
-    temperature = float(checkpoint.get("temperature", 1.0))
+    temp = float(checkpoint.get("temperature", 1.0))
 
-    model_params = SiameseParameters(**checkpoint["model_params"])
-    model = SiameseDraftPredictor(
+    model_params = SiameseParameters.from_dict(checkpoint["model_params"])
+    draft_model = SiameseDraftPredictor(
         model_params,
-        hdm.get_projected_hero_embeddings(model_params.d_model),
+        hdm.get_hero_features_matrix(),
     )
-    model.load_state_dict(checkpoint["model_state"], strict=False)
-    model.to(device)
-    model.eval()
-    return model, temperature
+    draft_model.load_state_dict(checkpoint["model_state"], strict=False)
+    draft_model.to(device)
+    draft_model.eval()
+    return draft_model, temp
 
 
 hero_data_manager = get_hero_data_manager()
@@ -57,9 +55,6 @@ model, temperature = get_model()
 latest_patch_id = get_latest_patch_id()
 
 
-# =====================================================================
-# Helpers
-# =====================================================================
 def get_hero_meta(localized_name: str) -> tuple[str, str]:
     row = hero_data_manager.processed_heroes.loc[
         hero_data_manager.processed_heroes["localized_name"] == localized_name
@@ -68,7 +63,6 @@ def get_hero_meta(localized_name: str) -> tuple[str, str]:
         return "Universal", ""
     rec = row.iloc[0]
 
-    # Attribute
     if rec.get("primary_attr_str", 0) == 1:
         attr = "Strength"
     elif rec.get("primary_attr_agi", 0) == 1:
@@ -78,7 +72,6 @@ def get_hero_meta(localized_name: str) -> tuple[str, str]:
     else:
         attr = "Universal"
 
-    # Mechanics
     mechanics = []
     flags = [
         ("has_bkb_pierce", "BKB Pierce"),
@@ -137,8 +130,16 @@ def calculate_baseline_winrate(
         return 0.50
 
     baseline_ids = build_draft_sequence(team_picks, opponent_picks)
-    baseline_tensor = torch.tensor([baseline_ids], dtype=torch.long, device=device)
-    patch_tensor = torch.tensor([latest_patch_id], dtype=torch.long, device=device)
+    baseline_tensor = torch.tensor(
+        [baseline_ids],
+        dtype=torch.long,
+        device=device,
+    )
+    patch_tensor = torch.tensor(
+        [latest_patch_id],
+        dtype=torch.long,
+        device=device,
+    )
 
     with torch.no_grad():
         logits = model(baseline_tensor, patch_tensor)
@@ -148,22 +149,27 @@ def calculate_baseline_winrate(
 def get_recommendations(
     team_picks: list[str],
     opponent_picks: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     already_picked = set(team_picks) | set(opponent_picks)
-    all_heroes = hero_data_manager.get_heroes_localized_names()
-    candidates = [h for h in all_heroes if h not in already_picked]
+    candidates = [
+        h
+        for h in hero_data_manager.get_heroes_localized_names()
+        if h not in already_picked
+    ]
 
     if not candidates:
         return []
 
-    batch_draft_ids = [
-        build_draft_sequence(team_picks, opponent_picks, c)
-        for c in candidates
-    ]
-
-    draft_tensor = torch.tensor(batch_draft_ids, dtype=torch.long, device=device)
+    draft_tensor = torch.tensor(
+        [
+            build_draft_sequence(team_picks, opponent_picks, c)
+            for c in candidates
+        ],
+        dtype=torch.long,
+        device=device,
+    )
     patch_tensor = torch.full(
-        (len(batch_draft_ids),),
+        (len(candidates),),
         fill_value=latest_patch_id,
         dtype=torch.long,
         device=device,
@@ -174,95 +180,101 @@ def get_recommendations(
         probs = torch.sigmoid(logits / temperature).cpu().numpy().flatten()
 
     baseline = calculate_baseline_winrate(team_picks, opponent_picks)
-    results = []
+    results: list[dict[str, Any]] = []
 
     for hero, prob in zip(candidates, probs, strict=False):
         attr, mechanics = get_hero_meta(hero)
-        results.append({
-            "Hero": hero,
-            "Attribute": attr,
-            "Win Rate": float(prob),
-            "Impact": float(prob - baseline),
-            "Mechanics": mechanics,
-        })
+        results.append(
+            {
+                "Hero": hero,
+                "Attribute": attr,
+                "Win Rate": float(prob),
+                "Impact": float(prob - baseline),
+                "Mechanics": mechanics,
+            },
+        )
 
-    results.sort(key=lambda x: x["Win Rate"], reverse=True)
+    results.sort(key=lambda x: float(x["Win Rate"]), reverse=True)
     return results
 
 
-# =====================================================================
-# UI - Top Compact Draft Setup
-# =====================================================================
-all_heroes = sorted(hero_data_manager.get_heroes_localized_names())
+def main() -> None:
+    all_heroes = sorted(hero_data_manager.get_heroes_localized_names())
 
-top_col_allies, top_col_enemies, top_col_stat = st.columns([3, 3, 2])
+    top_col_allies, top_col_enemies, top_col_stat = st.columns([3, 3, 2])
 
-with top_col_allies:
-    team_picks = st.multiselect(
-        "Allies (max 5)",
-        options=all_heroes,
-        max_selections=5,
-        placeholder="Select allies...",
-        key="team_picks_multiselect",
-    )
-
-with top_col_enemies:
-    opp_options = [h for h in all_heroes if h not in team_picks]
-    opponent_picks = st.multiselect(
-        "Enemies (max 5)",
-        options=opp_options,
-        max_selections=5,
-        placeholder="Select enemies...",
-        key="opponent_picks_multiselect",
-    )
-
-with top_col_stat:
-    baseline = calculate_baseline_winrate(team_picks, opponent_picks)
-    delta_val = (baseline - 0.50) * 100
-    delta_str = f"{delta_val:+.1f}% vs 50%" if abs(delta_val) >= 0.3 else "Even (50/50)"
-    st.metric(
-        label="Draft Win Probability",
-        value=f"{baseline * 100:.1f}%",
-        delta=delta_str,
-    )
-
-st.divider()
-
-# =====================================================================
-# UI - Information-Dense Recommendations Table
-# =====================================================================
-if len(team_picks) >= 5:
-    st.info("Your team is full (5/5 heroes picked).")
-else:
-    recs = get_recommendations(team_picks, opponent_picks)
-
-    search_hero = st.text_input(
-        "Search Hero",
-        placeholder="Filter by hero name...",
-        label_visibility="collapsed",
-    )
-    if search_hero.strip():
-        recs = [r for r in recs if search_hero.strip().lower() in r["Hero"].lower()]
-
-    if recs:
-        table_data = [
-            {
-                "Rank": idx + 1,
-                "Hero": r["Hero"],
-                "Win Rate": f"{r['Win Rate'] * 100:.1f}%",
-                "Win Impact": f"{r['Impact'] * 100:+.2f}%",
-                "Attribute": r["Attribute"],
-                "Key Mechanics": r["Mechanics"] if r["Mechanics"] else "—",
-            }
-            for idx, r in enumerate(recs)
-        ]
-        df = pd.DataFrame(table_data)
-
-        st.dataframe(
-            df,
-            width="stretch",
-            hide_index=True,
-            height=650,
+    with top_col_allies:
+        team_picks = st.multiselect(
+            "Allies (max 5)",
+            options=all_heroes,
+            max_selections=5,
+            placeholder="Select allies...",
+            key="team_picks_multiselect",
         )
+
+    with top_col_enemies:
+        opp_options = [h for h in all_heroes if h not in team_picks]
+        opponent_picks = st.multiselect(
+            "Enemies (max 4)",
+            options=opp_options,
+            max_selections=4,
+            placeholder="Select enemies...",
+            key="opponent_picks_multiselect",
+        )
+
+    with top_col_stat:
+        baseline = calculate_baseline_winrate(team_picks, opponent_picks)
+        has_picks = bool(team_picks or opponent_picks)
+        delta_val = (baseline - 0.50) * 100
+
+        st.metric(
+            label="Draft Win Probability",
+            value=f"{baseline * 100:.1f}%",
+            delta=f"{delta_val:+.1f}%" if has_picks else None,
+        )
+
+    st.divider()
+
+    if len(team_picks) >= MAX_PICK:
+        st.info("Your team is full (5/5 heroes picked).")
     else:
-        st.warning("No heroes found.")
+        recommendations = get_recommendations(team_picks, opponent_picks)
+
+        search_hero = st.text_input(
+            "Search Hero",
+            placeholder="Filter by hero name...",
+            label_visibility="collapsed",
+        )
+        if search_hero.strip():
+            recommendations = [
+                r
+                for r in recommendations
+                if search_hero.strip().lower() in r["Hero"].lower()
+            ]
+
+        if recommendations:
+            table_data = [
+                {
+                    "Rank": idx + 1,
+                    "Hero": r["Hero"],
+                    "Win Rate": f"{r['Win Rate'] * 100:.1f}%",
+                    "Win Impact": f"{r['Impact'] * 100:+.2f}%",
+                    "Attribute": r["Attribute"],
+                    "Key Mechanics": r["Mechanics"] if r["Mechanics"] else "—",
+                }
+                for idx, r in enumerate(recommendations)
+            ]
+            df = pd.DataFrame(table_data)
+
+            st.dataframe(
+                df,
+                width="stretch",
+                hide_index=True,
+                height=650,
+            )
+        else:
+            st.warning("No heroes found.")
+
+
+if __name__ == "__main__":
+    main()
