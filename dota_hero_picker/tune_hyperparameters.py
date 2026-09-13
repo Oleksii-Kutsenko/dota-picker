@@ -19,10 +19,11 @@ from dota_hero_picker.training_utils import (
 
 from .model_trainer import ModelTrainer
 from .neural_network import (
+    ActivationEnum,
     DataDimensions,
     MatchupParameters,
-    SiameseDraftPredictor,
-    SiameseParameters,
+    MatchWinPredictor,
+    ModelParameters,
     SynergyParameters,
 )
 from .patch_resolver import get_patches_number
@@ -37,10 +38,22 @@ def create_objective(
 ) -> Callable[[Trial], float]:
     def objective(trial: Trial) -> float:
 
+        patch_embedding_dim = trial.suggest_categorical(
+            "patch_embedding_dim",
+            [8, 16, 32, 64, 128, 256, 512, 1024],
+        )
+        stat_projection_activation = trial.suggest_categorical(
+            "stat_projection_activation",
+            [activation.value for activation in ActivationEnum],
+        )
+
+        activation = trial.suggest_categorical(
+            "activation",
+            [activation.value for activation in ActivationEnum],
+        )
         d_model = trial.suggest_categorical(
             "d_model",
             [
-                4,
                 8,
                 16,
                 32,
@@ -56,38 +69,26 @@ def create_objective(
                 1,
                 2,
                 4,
-                8,
             ],
         )
-        num_synergy_layers = trial.suggest_int("num_synergy_layers", 2, 7)
+        num_synergy_layers = trial.suggest_int("num_synergy_layers", 2, 6)
         dropout_rate = trial.suggest_float(
             "dropout_rate",
-            0.25,
+            0.2,
             0.45,
         )
-        patch_embedding_dim = trial.suggest_categorical(
-            "patch_embedding_dim",
-            [
-                16,
-                32,
-                64,
-                128,
-                256,
-                512,
-            ],
-        )
-        ffn_ratio = trial.suggest_categorical("ffn_ratio", [1, 2, 4, 8, 16])
+        ffn_ratio = trial.suggest_categorical("ffn_ratio", [2, 4, 8, 16])
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
             5,
-            15,
+            14,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            6,
+            7,
             17,
         )
-        num_matchup_layers = trial.suggest_int("num_matchup_layers", 1, 4)
+        num_matchup_layers = trial.suggest_int("num_matchup_layers", 1, 3)
 
         training_arguments = TrainingArguments(
             data=TrainingData(
@@ -96,7 +97,7 @@ def create_objective(
             ),
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-6, 1e-2, log=True),
+                lr=trial.suggest_float("lr", 1e-5, 1e-1, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
                     1e-4,
@@ -108,12 +109,12 @@ def create_objective(
                 factor=trial.suggest_float(
                     "factor",
                     0.6,
-                    0.8,
+                    0.75,
                 ),
                 threshold=trial.suggest_float(
                     "threshold",
                     1e-5,
-                    1e-4,
+                    1e-3,
                     log=True,
                 ),
                 scheduler_patience=scheduler_patience,
@@ -121,6 +122,7 @@ def create_objective(
             batch_size=trial.suggest_categorical(
                 "batch_size",
                 [
+                    16,
                     32,
                     64,
                     128,
@@ -130,13 +132,13 @@ def create_objective(
                     2048,
                 ],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 13, 23),
+            decision_weight=trial.suggest_int("decision_weight", 14, 23),
         )
 
         if d_model % num_heads != 0:
             raise optuna.TrialPruned
 
-        model_params = SiameseParameters(
+        model_params = ModelParameters(
             data_dimensions=DataDimensions(
                 num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
                 num_patches=get_patches_number(),
@@ -153,8 +155,12 @@ def create_objective(
             d_model=d_model,
             dropout_rate=dropout_rate,
             patch_embedding_dim=patch_embedding_dim,
+            stat_projection_activation=ActivationEnum(
+                stat_projection_activation,
+            ),
+            activation=ActivationEnum(activation),
         )
-        model = SiameseDraftPredictor(
+        model = MatchWinPredictor(
             model_params,
             hero_data_manager.get_hero_features_matrix(),
         )

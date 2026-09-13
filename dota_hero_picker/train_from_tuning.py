@@ -15,8 +15,8 @@ from dota_hero_picker.model_trainer import ModelTrainer
 from dota_hero_picker.neural_network import (
     DataDimensions,
     MatchupParameters,
-    SiameseDraftPredictor,
-    SiameseParameters,
+    MatchWinPredictor,
+    ModelParameters,
     SynergyParameters,
 )
 from dota_hero_picker.patch_resolver import get_patches_number
@@ -79,9 +79,9 @@ def get_latest_study_name() -> str:
 def build_candidate_setup(
     trial_row: pd.Series,
     model_trainer: ModelTrainer,
-) -> tuple[SiameseDraftPredictor, SiameseParameters, TrainingArguments]:
+) -> tuple[MatchWinPredictor, ModelParameters, TrainingArguments]:
     """Convert an Optuna trial row into Model and TrainingArguments."""
-    model_params = SiameseParameters(
+    model_params = ModelParameters(
         data_dimensions=DataDimensions(
             num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
             num_patches=get_patches_number(),
@@ -120,7 +120,7 @@ def build_candidate_setup(
         decision_weight=int(trial_row["params_decision_weight"]),
     )
     return (
-        SiameseDraftPredictor(
+        MatchWinPredictor(
             model_params,
             model_trainer.hero_data_manager.get_hero_features_matrix(),
         ),
@@ -131,7 +131,7 @@ def build_candidate_setup(
 
 def save_stable_model(
     model_state: dict[str, Any],
-    model_params: SiameseParameters,
+    model_params: ModelParameters,
     temperature: float,
 ) -> None:
     """Save the best model state, architecture parameters, and temperature."""
@@ -139,7 +139,7 @@ def save_stable_model(
     torch.save(
         {
             "model_state": model_state,
-            "model_params": dataclasses.asdict(model_params),
+            "model_params": model_params.to_dict(),
             "temperature": temperature,
         },
         save_path,
@@ -152,9 +152,10 @@ class SeedRunResult:
     """Outcome of a single training run on a specific random seed."""
 
     seed: int
+    val_metrics: MetricsResult
     test_metrics: MetricsResult
     model_state: dict[str, Any]
-    model_params: SiameseParameters
+    model_params: ModelParameters
     temperature: float
 
 
@@ -201,11 +202,15 @@ class CandidateTrial:
         )
 
     @property
+    def mean_val_auc(self) -> float:
+        return float(np.mean([run.val_metrics.auc for run in self.seed_runs]))
+
+    @property
     def best_run(self) -> SeedRunResult:
         """The run that achieved the highest test AUC."""
         return max(
             self.seed_runs,
-            key=lambda run: run.test_metrics.auc,
+            key=lambda run: run.val_metrics.auc,
         )
 
 
@@ -247,6 +252,7 @@ def evaluate_trial_seed(
 
     return SeedRunResult(
         seed=seed,
+        val_metrics=early_stopping.best_metrics,
         test_metrics=calibrated_test_metrics,
         model_state=copy.deepcopy(early_stopping.best_model_state),
         model_params=model_params,
@@ -363,7 +369,7 @@ def train_best_model(csv_file_path: Path) -> None:
     ]
 
     # Rank candidate trials by mean Test AUC (highest first)
-    candidate_trials.sort(key=lambda item: item.mean_test_auc, reverse=True)
+    candidate_trials.sort(key=lambda item: item.mean_val_auc, reverse=True)
 
     # Print summary benchmark table
     logger.info("=" * 79)

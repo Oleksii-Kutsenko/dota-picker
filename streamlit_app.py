@@ -9,8 +9,8 @@ import settings
 from dota_hero_picker.data_preparation import MAX_PICK
 from dota_hero_picker.hero_data_manager import HeroDataManager
 from dota_hero_picker.neural_network import (
-    SiameseDraftPredictor,
-    SiameseParameters,
+    MatchWinPredictor,
+    ModelParameters,
 )
 from dota_hero_picker.patch_resolver import get_latest_patch_id
 
@@ -39,8 +39,8 @@ def get_model() -> tuple[torch.nn.Module, float]:
     checkpoint = torch.load(model_path, map_location=device)
     temp = float(checkpoint.get("temperature", 1.0))
 
-    model_params = SiameseParameters.from_dict(checkpoint["model_params"])
-    draft_model = SiameseDraftPredictor(
+    model_params = ModelParameters.from_dict(checkpoint["model_params"])
+    draft_model = MatchWinPredictor(
         model_params,
         hdm.get_hero_features_matrix(),
     )

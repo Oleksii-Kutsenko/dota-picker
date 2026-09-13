@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 from pathlib import Path
 
@@ -12,10 +13,11 @@ from dota_hero_picker.hero_data_manager import HeroDataManager
 
 from .data_manager import DataManager
 from .neural_network import (
+    ActivationEnum,
     DataDimensions,
     MatchupParameters,
-    SiameseDraftPredictor,
-    SiameseParameters,
+    MatchWinPredictor,
+    ModelParameters,
     SynergyParameters,
 )
 from .patch_resolver import get_patches_number
@@ -30,8 +32,10 @@ from .training_utils import (
     TrainingComponents,
     TrainingData,
     TrainingExample,
+    collect_logits_and_labels,
     count_trainable_params,
     evaluate_model,
+    fit_temperature,
     get_data_loader,
     train_step,
 )
@@ -81,26 +85,28 @@ class ModelTrainer:
         )
 
     @classmethod
-    def create_default_model(cls) -> SiameseDraftPredictor:
-        params = SiameseParameters(
+    def create_default_model(cls) -> MatchWinPredictor:
+        params = ModelParameters(
+            activation=ActivationEnum.SILU,
             data_dimensions=DataDimensions(
                 num_heroes=cls.hero_data_manager.get_heroes_number(),
                 num_patches=get_patches_number(),
             ),
             synergy_parameters=SynergyParameters(
-                num_heads=2,
+                num_heads=1,
                 num_layers=3,
-                ffn_ratio=2,
+                ffn_ratio=16,
             ),
             matchup_parameters=MatchupParameters(
-                num_heads=2,
-                num_layers=1,
+                num_heads=1,
+                num_layers=2,
             ),
-            d_model=16,
-            dropout_rate=0.363054,
-            patch_embedding_dim=32,
+            d_model=32,
+            dropout_rate=0.346332672403566,
+            patch_embedding_dim=1024,
+            stat_projection_activation=ActivationEnum.RELU,
         )
-        return SiameseDraftPredictor(
+        return MatchWinPredictor(
             params,
             cls.hero_data_manager.get_hero_features_matrix(),
         )
@@ -113,17 +119,17 @@ class ModelTrainer:
                 train_dataset=self.data_manager.train_dataset,
                 val_dataset=self.data_manager.val_dataset,
             ),
-            early_stopping_patience=15,
+            early_stopping_patience=10,
             optimizer_parameters=OptimizerParameters(
-                lr=0.000648,
-                weight_decay=0.0,
+                lr=0.0007792575081872143,
+                weight_decay=0.022257185706896027,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.785886,
-                scheduler_patience=12,
-                threshold=0.019316,
+                factor=0.6767680466999438,
+                scheduler_patience=14,
+                threshold=3.3608190109407845e-05,
             ),
-            decision_weight=22,
+            decision_weight=20,
             batch_size=256,
         )
 
@@ -198,7 +204,6 @@ class ModelTrainer:
                 patience=self.training_arguments.early_stopping_patience,
                 mode=EarlyStoppingMode.MIN,
             ),
-            scaler=GradScaler(enabled=torch.cuda.is_available()),
         )
 
         train_loader = get_data_loader(
@@ -274,11 +279,25 @@ class ModelTrainer:
         """Model training entrypoint."""
         self.setup_default_training()
         assert self.training_arguments is not None
+        assert self.model is not None
 
         self.train_model()
         assert self.training_components is not None
 
-        test_metrics = self.evaluate_on_test(1)
+        # 1. Calibrate temperature on validation set
+        val_loader = get_data_loader(
+            self.training_arguments.data.val_dataset,
+            self.training_arguments.batch_size,
+            ShuffleEnum.UNSHUFFLED,
+        )
+        val_logits, val_labels = collect_logits_and_labels(
+            self.model,
+            val_loader,
+        )
+        temperature = fit_temperature(val_logits, val_labels)
+
+        # 2. Evaluate on test set with calibrated temperature
+        test_metrics = self.evaluate_on_test(temperature)
 
         logger.info("Test Metrics")
         logger.info(test_metrics)
@@ -298,10 +317,17 @@ class ModelTrainer:
         logger.info(row2)
         logger.info("------------------------")
 
+        # 3. Save full checkpoint dictionary
+        settings.MODELS_FOLDER_PATH.mkdir(parents=True, exist_ok=True)
+        save_path = settings.MODELS_FOLDER_PATH / Path("trained_model.pth")
         torch.save(
-            self.training_components.early_stopping.best_model_state,
-            settings.MODELS_FOLDER_PATH / Path("trained_model.pth"),
+            {
+                "model_state": self.training_components.early_stopping.best_model_state,
+                "model_params": self.model.params.to_dict(),
+                "temperature": temperature,
+            },
+            save_path,
         )
         logger.info(
-            "Training complete! Model saved as 'trained_model.pth'.",
+            f"Training complete! Model saved to '{save_path}'.",
         )

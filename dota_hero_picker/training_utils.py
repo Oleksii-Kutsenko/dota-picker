@@ -222,7 +222,6 @@ class TrainingComponents:
     optimizer: optim.Adam
     scheduler: optim.lr_scheduler.ReduceLROnPlateau
     early_stopping: EarlyStopping
-    scaler: GradScaler
     callbacks: list[Callable[[None], None]] | None = None
 
     def __post_init__(self) -> None:
