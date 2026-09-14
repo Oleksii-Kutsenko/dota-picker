@@ -21,10 +21,8 @@ from .model_trainer import ModelTrainer
 from .neural_network import (
     ActivationEnum,
     DataDimensions,
-    MatchupParameters,
     MatchWinPredictor,
     ModelParameters,
-    SynergyParameters,
 )
 from .patch_resolver import get_patches_number
 
@@ -40,13 +38,21 @@ def create_objective(
 
         patch_embedding_dim = trial.suggest_categorical(
             "patch_embedding_dim",
-            [8, 16, 32, 64, 128, 256, 512, 1024],
+            [
+                4,
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+            ],
         )
         stat_projection_activation = trial.suggest_categorical(
             "stat_projection_activation",
             [activation.value for activation in ActivationEnum],
         )
-
         activation = trial.suggest_categorical(
             "activation",
             [activation.value for activation in ActivationEnum],
@@ -63,32 +69,41 @@ def create_objective(
                 512,
             ],
         )
+        num_layers = trial.suggest_int("num_layers", 1, 4)
         num_heads = trial.suggest_categorical(
             "num_heads",
             [
                 1,
                 2,
                 4,
+                8,
             ],
         )
-        num_synergy_layers = trial.suggest_int("num_synergy_layers", 2, 6)
+        ffn_ratio = trial.suggest_categorical(
+            "ffn_ratio",
+            [
+                1,
+                2,
+                4,
+                8,
+            ],
+        )
+        hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
         dropout_rate = trial.suggest_float(
             "dropout_rate",
-            0.2,
-            0.45,
+            0.25,
+            0.5,
         )
-        ffn_ratio = trial.suggest_categorical("ffn_ratio", [2, 4, 8, 16])
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            5,
-            14,
+            4,
+            13,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            7,
+            6,
             17,
         )
-        num_matchup_layers = trial.suggest_int("num_matchup_layers", 1, 3)
 
         training_arguments = TrainingArguments(
             data=TrainingData(
@@ -97,7 +112,7 @@ def create_objective(
             ),
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-5, 1e-1, log=True),
+                lr=trial.suggest_float("lr", 1e-4, 1e-2, log=True),
                 weight_decay=trial.suggest_float(
                     "weight_decay",
                     1e-4,
@@ -108,7 +123,7 @@ def create_objective(
             scheduler_parameters=SchedulerParameters(
                 factor=trial.suggest_float(
                     "factor",
-                    0.6,
+                    0.55,
                     0.75,
                 ),
                 threshold=trial.suggest_float(
@@ -132,7 +147,7 @@ def create_objective(
                     2048,
                 ],
             ),
-            decision_weight=trial.suggest_int("decision_weight", 14, 23),
+            decision_weight=trial.suggest_int("decision_weight", 14, 22),
         )
 
         if d_model % num_heads != 0:
@@ -143,15 +158,10 @@ def create_objective(
                 num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
                 num_patches=get_patches_number(),
             ),
-            synergy_parameters=SynergyParameters(
-                num_heads=num_heads,
-                num_layers=num_synergy_layers,
-                ffn_ratio=ffn_ratio,
-            ),
-            matchup_parameters=MatchupParameters(
-                num_heads=num_heads,
-                num_layers=num_matchup_layers,
-            ),
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            ffn_ratio=ffn_ratio,
             d_model=d_model,
             dropout_rate=dropout_rate,
             patch_embedding_dim=patch_embedding_dim,

@@ -1,9 +1,7 @@
 import copy
-import dataclasses
 import logging
 import random
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import optuna
@@ -13,15 +11,13 @@ import torch
 import settings
 from dota_hero_picker.model_trainer import ModelTrainer
 from dota_hero_picker.neural_network import (
+    ActivationEnum,
     DataDimensions,
-    MatchupParameters,
     MatchWinPredictor,
     ModelParameters,
-    SynergyParameters,
 )
 from dota_hero_picker.patch_resolver import get_patches_number
 from dota_hero_picker.training_utils import (
-    MetricsResult,
     OptimizerParameters,
     SchedulerParameters,
     ShuffleEnum,
@@ -34,78 +30,56 @@ from dota_hero_picker.training_utils import (
 
 logger = logging.getLogger(__name__)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-TOP_CANDIDATES_COUNT = 5
-SEEDS_COUNT = 3
-MASTER_SEED = 42
-RANDOM_SEEDS = (
-    np.random.default_rng(MASTER_SEED)
-    .integers(
-        low=1,
-        high=100000,
-        size=SEEDS_COUNT,
-    )
-    .tolist()
-)
+SEEDS = [42, 123, 999]
+TOP_K_CANDIDATES = 5
 
 
 def set_seed(seed: int) -> None:
-    """Set random seed across all libraries for deterministic training."""
     random.seed(seed)
-    np.random.seed(seed)  # noqa: NPY002
+    np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
 def get_latest_study_name() -> str:
-    """Find the most recent Optuna study in the database."""
     summaries = optuna.study.get_all_study_summaries(
-        storage=settings.OPTUNA_STORAGE,
+        storage=settings.OPTUNA_STORAGE
     )
     if not summaries:
-        msg = "No studies found in the database"
-        raise RuntimeError(msg)
-
-    latest_summary = max(
-        summaries,
-        key=lambda summary: summary.datetime_start,  # type: ignore[arg-type, return-value]
-    )
-    logger.info(f"Using latest study: {latest_summary.study_name}")
-    return latest_summary.study_name
+        raise RuntimeError("No Optuna studies found in the database.")
+    latest = max(summaries, key=lambda s: s.datetime_start)
+    return latest.study_name
 
 
-def build_candidate_setup(
+def parse_trial(
     trial_row: pd.Series,
-    model_trainer: ModelTrainer,
+    trainer: ModelTrainer,
 ) -> tuple[MatchWinPredictor, ModelParameters, TrainingArguments]:
-    """Convert an Optuna trial row into Model and TrainingArguments."""
     model_params = ModelParameters(
         data_dimensions=DataDimensions(
-            num_heroes=model_trainer.hero_data_manager.get_heroes_number(),
+            num_heroes=trainer.hero_data_manager.get_heroes_number(),
             num_patches=get_patches_number(),
         ),
-        synergy_parameters=SynergyParameters(
-            num_heads=int(trial_row["params_num_heads"]),
-            num_layers=int(trial_row["params_num_synergy_layers"]),
-            ffn_ratio=int(trial_row["params_ffn_ratio"]),
-        ),
-        matchup_parameters=MatchupParameters(
-            num_heads=int(trial_row["params_num_heads"]),
-            num_layers=int(trial_row["params_num_matchup_layers"]),
-        ),
+        num_layers=int(trial_row["params_num_layers"]),
+        num_heads=int(trial_row["params_num_heads"]),
+        ffn_ratio=int(trial_row["params_ffn_ratio"]),
         d_model=int(trial_row["params_d_model"]),
+        hidden_dim=int(trial_row.get("params_hidden_dim", 128)),
         dropout_rate=float(trial_row["params_dropout_rate"]),
         patch_embedding_dim=int(trial_row["params_patch_embedding_dim"]),
+        stat_projection_activation=ActivationEnum(
+            trial_row["params_stat_projection_activation"],
+        ),
+        activation=ActivationEnum(trial_row["params_activation"]),
     )
-    training_arguments = TrainingArguments(
+    training_args = TrainingArguments(
         data=TrainingData(
-            train_dataset=model_trainer.data_manager.train_dataset,
-            val_dataset=model_trainer.data_manager.val_dataset,
+            train_dataset=trainer.data_manager.train_dataset,
+            val_dataset=trainer.data_manager.val_dataset,
         ),
         early_stopping_patience=int(
-            trial_row["params_early_stopping_patience"],
+            trial_row["params_early_stopping_patience"]
         ),
         optimizer_parameters=OptimizerParameters(
             lr=float(trial_row["params_lr"]),
@@ -119,306 +93,117 @@ def build_candidate_setup(
         batch_size=int(trial_row["params_batch_size"]),
         decision_weight=int(trial_row["params_decision_weight"]),
     )
-    return (
-        MatchWinPredictor(
-            model_params,
-            model_trainer.hero_data_manager.get_hero_features_matrix(),
-        ),
+    model = MatchWinPredictor(
         model_params,
-        training_arguments,
+        trainer.hero_data_manager.get_hero_features_matrix(),
+    )
+    return model, model_params, training_args
+
+
+def train_best_model(csv_file_path: Path) -> None:
+    study_name = get_latest_study_name()
+    study = optuna.load_study(
+        study_name=study_name, storage=settings.OPTUNA_STORAGE
+    )
+    trials_df = study.trials_dataframe()
+    completed = trials_df[trials_df["state"] == "COMPLETE"]
+    if completed.empty:
+        raise RuntimeError(
+            f"No completed trials found in study '{study_name}'."
+        )
+
+    ascending = study.direction == optuna.study.StudyDirection.MINIMIZE
+    top_trials = completed.sort_values("value", ascending=ascending).head(
+        TOP_K_CANDIDATES
     )
 
+    trainer = ModelTrainer(csv_file_path, random_state=42)
+    logger.info(
+        f"Retraining top {len(top_trials)} candidates across seeds {SEEDS}..."
+    )
 
-def save_stable_model(
-    model_state: dict[str, Any],
-    model_params: ModelParameters,
-    temperature: float,
-) -> None:
-    """Save the best model state, architecture parameters, and temperature."""
-    save_path = settings.MODELS_FOLDER_PATH / Path("stable_model.pth")
+    best_val_auc = -float("inf")
+    champion = None
+
+    for rank, (_, trial_row) in enumerate(top_trials.iterrows(), start=1):
+        trial_num = int(trial_row["number"])
+        optuna_val = float(trial_row["value"])
+        seed_aucs = []
+
+        for seed in SEEDS:
+            set_seed(seed)
+            model, params, args = parse_trial(trial_row, trainer)
+            trainer.setup_custom_training(model, args)
+            trainer.train_model()
+
+            early_stopping = trainer.training_components.early_stopping
+            val_auc = early_stopping.best_metrics.auc
+            seed_aucs.append(val_auc)
+
+            if val_auc > best_val_auc:
+                best_val_auc = val_auc
+                champion = {
+                    "trial_number": trial_num,
+                    "seed": seed,
+                    "val_auc": val_auc,
+                    "model": model,
+                    "model_state": copy.deepcopy(
+                        early_stopping.best_model_state
+                    ),
+                    "model_params": params,
+                    "training_args": args,
+                }
+
+        mean_auc, std_auc = float(np.mean(seed_aucs)), float(np.std(seed_aucs))
+        logger.info(
+            f"Candidate {rank}/{len(top_trials)} (Trial #{trial_num}, score: {optuna_val:.4f}): "
+            f"Val AUC = {mean_auc:.4f} +/- {std_auc:.4f}",
+        )
+
+    if champion is None:
+        raise RuntimeError("No candidate was successfully trained.")
+
+    # Calibrate temperature on validation set for the champion model
+    champion["model"].load_state_dict(champion["model_state"])
+    val_loader = get_data_loader(
+        trainer.data_manager.val_dataset,
+        champion["training_args"].batch_size,
+        ShuffleEnum.UNSHUFFLED,
+    )
+    val_logits, val_labels = collect_logits_and_labels(
+        champion["model"], val_loader
+    )
+    temperature = fit_temperature(val_logits, val_labels)
+
+    # Evaluate champion on the held-out test set
+    trainer.model = champion["model"]
+    trainer.training_arguments = champion["training_args"]
+    test_metrics = trainer.evaluate_on_test(temperature)
+
+    logger.info(
+        f"\nChampion: Trial #{champion['trial_number']} (seed={champion['seed']})\n"
+        f"Val AUC: {champion['val_auc']:.4f} | Test AUC: {test_metrics.auc:.4f} | "
+        f"Test Loss: {test_metrics.loss:.4f} | ECE: {test_metrics.ece:.4f} | Temp: {temperature:.3f}",
+    )
+
+    # Save to stable_model.pth
+    settings.MODELS_FOLDER_PATH.mkdir(parents=True, exist_ok=True)
+    save_path = settings.MODELS_FOLDER_PATH / "stable_model.pth"
     torch.save(
         {
-            "model_state": model_state,
-            "model_params": model_params.to_dict(),
+            "model_state": champion["model_state"],
+            "model_params": champion["model_params"].to_dict(),
             "temperature": temperature,
         },
         save_path,
     )
-    logger.info(f"Successfully saved best model to {save_path}")
-
-
-@dataclasses.dataclass
-class SeedRunResult:
-    """Outcome of a single training run on a specific random seed."""
-
-    seed: int
-    val_metrics: MetricsResult
-    test_metrics: MetricsResult
-    model_state: dict[str, Any]
-    model_params: ModelParameters
-    temperature: float
-
-
-@dataclasses.dataclass
-class CandidateTrial:
-    """Evaluated candidate trial across all random seeds."""
-
-    trial_number: int
-    optuna_score: float
-    seed_runs: list[SeedRunResult] = dataclasses.field(default_factory=list)
-
-    @property
-    def mean_test_auc(self) -> float:
-        return float(
-            np.mean([run.test_metrics.auc for run in self.seed_runs]),
-        )
-
-    @property
-    def std_test_auc(self) -> float:
-        return float(np.std([run.test_metrics.auc for run in self.seed_runs]))
-
-    @property
-    def mean_test_loss(self) -> float:
-        return float(
-            np.mean([run.test_metrics.loss for run in self.seed_runs]),
-        )
-
-    @property
-    def std_test_loss(self) -> float:
-        return float(
-            np.std([run.test_metrics.loss for run in self.seed_runs]),
-        )
-
-    @property
-    def mean_test_ece(self) -> float:
-        return float(
-            np.mean([run.test_metrics.ece for run in self.seed_runs]),
-        )
-
-    @property
-    def mean_test_mcc(self) -> float:
-        return float(
-            np.mean([run.test_metrics.mcc for run in self.seed_runs]),
-        )
-
-    @property
-    def mean_val_auc(self) -> float:
-        return float(np.mean([run.val_metrics.auc for run in self.seed_runs]))
-
-    @property
-    def best_run(self) -> SeedRunResult:
-        """The run that achieved the highest test AUC."""
-        return max(
-            self.seed_runs,
-            key=lambda run: run.val_metrics.auc,
-        )
-
-
-def evaluate_trial_seed(
-    trial_row: pd.Series,
-    model_trainer: ModelTrainer,
-    seed: int,
-) -> SeedRunResult:
-    """Train and evaluate a single seed for a given trial configuration."""
-    set_seed(seed)
-
-    model, model_params, training_args = build_candidate_setup(
-        trial_row,
-        model_trainer,
-    )
-    model_trainer.setup_custom_training(model, training_args)
-    model_trainer.train_model()
-
-    assert model_trainer.training_components is not None
-    early_stopping = model_trainer.training_components.early_stopping
-    assert early_stopping.best_model_state is not None
-
-    # Calibrate temperature on the validation set
-    validation_loader = get_data_loader(
-        model_trainer.data_manager.val_dataset,
-        training_args.batch_size,
-        ShuffleEnum.UNSHUFFLED,
-    )
-    validation_logits, validation_labels = collect_logits_and_labels(
-        model,
-        validation_loader,
-    )
-    temperature = fit_temperature(validation_logits, validation_labels)
-
-    # Evaluate on the held-out test set
-    calibrated_test_metrics = model_trainer.evaluate_on_test(
-        temperature=temperature,
-    )
-
-    return SeedRunResult(
-        seed=seed,
-        val_metrics=early_stopping.best_metrics,
-        test_metrics=calibrated_test_metrics,
-        model_state=copy.deepcopy(early_stopping.best_model_state),
-        model_params=model_params,
-        temperature=temperature,
-    )
-
-
-def save_evaluation_report(
-    candidate_trials: list[CandidateTrial],
-) -> None:
-    """Persist all individual seed runs across candidates to CSV."""
-    report_path: Path = Path("tuning_evaluation_report.csv")
-    report_records = [
-        {
-            "trial_number": candidate.trial_number,
-            "seed": run.seed,
-            "optuna_score": candidate.optuna_score,
-            "test_auc": run.test_metrics.auc,
-            "test_loss": run.test_metrics.loss,
-            "test_ece": run.test_metrics.ece,
-            "test_mcc": run.test_metrics.mcc,
-            "temperature": run.temperature,
-        }
-        for candidate in candidate_trials
-        for run in candidate.seed_runs
-    ]
-    pd.DataFrame(report_records).to_csv(report_path, index=False)
-    logger.info(f"Detailed run records saved to {report_path.resolve()}")
-
-
-def get_top_trials(
-    study: optuna.Study,
-    top_candidates_count: int = TOP_CANDIDATES_COUNT,
-) -> pd.DataFrame:
-    """Retrieve the top completed trials sorted by the study direction."""
-    trials_dataframe = study.trials_dataframe()
-    completed_trials = trials_dataframe.loc[
-        trials_dataframe["state"] == "COMPLETE"
-    ]
-    if completed_trials.empty:
-        msg = f"No completed trials found in study {study.study_name}"
-        raise RuntimeError(msg)
-
-    is_maximize = study.direction == optuna.study.StudyDirection.MAXIMIZE
-    sorted_trials = completed_trials.sort_values(
-        "value",
-        ascending=not is_maximize,
-    )
-    return sorted_trials.head(top_candidates_count)
-
-
-def evaluate_candidate_trial(
-    trial_row: pd.Series,
-    model_trainer: ModelTrainer,
-    seeds: list[int],
-    rank: int,
-    total_candidates: int,
-) -> CandidateTrial:
-    """Evaluate a single candidate trial across multiple random seeds."""
-    trial_number = int(trial_row["number"])
-    optuna_score = float(trial_row["value"])
-    logger.info(
-        f"Evaluating Candidate {rank}/{total_candidates} "
-        f"(Trial #{trial_number}, Optuna Score: {optuna_score:.4f})",
-    )
-
-    candidate = CandidateTrial(
-        trial_number=trial_number,
-        optuna_score=optuna_score,
-    )
-
-    for seed in seeds:
-        logger.info(f"Training Trial #{trial_number} with seed={seed}...")
-        run_result = evaluate_trial_seed(trial_row, model_trainer, seed)
-        candidate.seed_runs.append(run_result)
-
-        logger.info(
-            f"Seed {seed} Result: "
-            f"AUC={run_result.test_metrics.auc:.4f}, "
-            f"Loss={run_result.test_metrics.loss:.4f}, "
-            f"ECE={run_result.test_metrics.ece:.4f}, "
-            f"MCC={run_result.test_metrics.mcc:.4f}",
-        )
-
-    return candidate
-
-
-def train_best_model(csv_file_path: Path) -> None:
-    """Retrain top Optuna candidates."""
-    study = optuna.load_study(
-        study_name=get_latest_study_name(),
-        storage=settings.OPTUNA_STORAGE,
-    )
-    top_trials = get_top_trials(
-        study,
-        top_candidates_count=TOP_CANDIDATES_COUNT,
-    )
-    logger.info(
-        f"Selected top {len(top_trials)} candidate trials for retraining.",
-    )
-
-    model_trainer = ModelTrainer(csv_file_path, random_state=MASTER_SEED)
-    total_candidates = len(top_trials)
-
-    candidate_trials = [
-        evaluate_candidate_trial(
-            trial_row=trial_row,
-            model_trainer=model_trainer,
-            seeds=RANDOM_SEEDS,
-            rank=rank,
-            total_candidates=total_candidates,
-        )
-        for rank, (_, trial_row) in enumerate(top_trials.iterrows(), start=1)
-    ]
-
-    # Rank candidate trials by mean Test AUC (highest first)
-    candidate_trials.sort(key=lambda item: item.mean_val_auc, reverse=True)
-
-    # Print summary benchmark table
-    logger.info("=" * 79)
-    logger.info("TOP CANDIDATES RETRAINING BENCHMARK (SEEDS: 42, 123, 999)")
-    logger.info("=" * 79)
-    header = (
-        f"{'Rank':<5} | {'Trial':<7} | {'Optuna':<8} | "
-        f"{'Mean AUC (std)':<18} | {'Mean Loss (std)':<18} | "
-        f"{'Mean ECE':<8} | {'Mean MCC':<8}"
-    )
-    logger.info(header)
-    logger.info("-" * 79)
-    for rank, candidate in enumerate(candidate_trials, start=1):
-        auc_summary = (
-            f"{candidate.mean_test_auc:.4f} ({candidate.std_test_auc:.4f})"
-        )
-        loss_summary = (
-            f"{candidate.mean_test_loss:.4f} ({candidate.std_test_loss:.4f})"
-        )
-        row_display = (
-            f"{rank:<5} | #{candidate.trial_number:<6} | "
-            f"{candidate.optuna_score:<8.4f} | "
-            f"{auc_summary:<18} | {loss_summary:<18} | "
-            f"{candidate.mean_test_ece:<8.4f} | "
-            f"{candidate.mean_test_mcc:<8.4f}"
-        )
-        logger.info(row_display)
-    logger.info("=" * 79)
-
-    # Save detailed evaluation CSV report
-    save_evaluation_report(
-        candidate_trials,
-    )
-
-    # Save champion model (Rank 1 by mean Test AUC)
-    champion_trial = candidate_trials[0]
-    best_champion_run = champion_trial.best_run
-    logger.info(
-        f"Champion: Trial #{champion_trial.trial_number} with "
-        f"Mean Test AUC: {champion_trial.mean_test_auc:.4f} "
-        f"(std: {champion_trial.std_test_auc:.4f})",
-    )
-    save_stable_model(
-        best_champion_run.model_state,
-        best_champion_run.model_params,
-        best_champion_run.temperature,
-    )
+    logger.info(f"Champion model saved to '{save_path}'.")
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     train_best_model(settings.PERSONAL_DOTA_MATCHES_PATH)
+
+
+if __name__ == "__main__":
+    main()

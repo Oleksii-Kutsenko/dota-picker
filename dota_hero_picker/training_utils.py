@@ -14,7 +14,6 @@ from sklearn.metrics import (
     f1_score,
 )
 from torch import nn, optim
-from torch.amp import GradScaler
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics import MetricCollection
 from torchmetrics.classification import (

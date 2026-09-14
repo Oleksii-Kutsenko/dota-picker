@@ -1,11 +1,9 @@
-import dataclasses
 import logging
 from pathlib import Path
 
 import optuna
 import torch
 from torch import nn, optim
-from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 
 import settings
@@ -15,10 +13,8 @@ from .data_manager import DataManager
 from .neural_network import (
     ActivationEnum,
     DataDimensions,
-    MatchupParameters,
     MatchWinPredictor,
     ModelParameters,
-    SynergyParameters,
 )
 from .patch_resolver import get_patches_number
 from .training_utils import (
@@ -92,18 +88,13 @@ class ModelTrainer:
                 num_heroes=cls.hero_data_manager.get_heroes_number(),
                 num_patches=get_patches_number(),
             ),
-            synergy_parameters=SynergyParameters(
-                num_heads=1,
-                num_layers=3,
-                ffn_ratio=16,
-            ),
-            matchup_parameters=MatchupParameters(
-                num_heads=1,
-                num_layers=2,
-            ),
-            d_model=32,
-            dropout_rate=0.346332672403566,
-            patch_embedding_dim=1024,
+            num_layers=3,
+            num_heads=2,
+            ffn_ratio=2,
+            d_model=128,
+            hidden_dim=128,
+            dropout_rate=0.3440335156445883,
+            patch_embedding_dim=8,
             stat_projection_activation=ActivationEnum.RELU,
         )
         return MatchWinPredictor(
@@ -119,18 +110,18 @@ class ModelTrainer:
                 train_dataset=self.data_manager.train_dataset,
                 val_dataset=self.data_manager.val_dataset,
             ),
-            early_stopping_patience=10,
+            early_stopping_patience=7,
             optimizer_parameters=OptimizerParameters(
-                lr=0.0007792575081872143,
-                weight_decay=0.022257185706896027,
+                lr=0.0009578678431815601,
+                weight_decay= 0.00021702295544389735,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=0.6767680466999438,
-                scheduler_patience=14,
-                threshold=3.3608190109407845e-05,
+                factor=0.6016957313572723,
+                scheduler_patience=6,
+                threshold=2.409466579096731e-05,
             ),
-            decision_weight=20,
-            batch_size=256,
+            decision_weight=14,
+            batch_size=128,
         )
 
     def train_epoch(
@@ -322,7 +313,7 @@ class ModelTrainer:
         save_path = settings.MODELS_FOLDER_PATH / Path("trained_model.pth")
         torch.save(
             {
-                "model_state": self.training_components.early_stopping.best_model_state,
+                "model_state": self.training_components.early_stopping.best_model_state,  # noqa: E501
                 "model_params": self.model.params.to_dict(),
                 "temperature": temperature,
             },
