@@ -113,7 +113,7 @@ class ModelTrainer:
             early_stopping_patience=7,
             optimizer_parameters=OptimizerParameters(
                 lr=0.0009578678431815601,
-                weight_decay= 0.00021702295544389735,
+                weight_decay=0.00021702295544389735,
             ),
             scheduler_parameters=SchedulerParameters(
                 factor=0.6016957313572723,
@@ -215,16 +215,16 @@ class ModelTrainer:
                 val_loader,
             )
 
-            if trial is not None:
-                intermediate_value = float(val_metrics.loss)
-                trial.report(intermediate_value, step=epoch)
-
-                if trial.should_prune():
-                    msg = (
-                        f"Pruned at epoch {epoch + 1} "
-                        f"with mcc={intermediate_value:.4f}"
-                    )
-                    raise optuna.TrialPruned(msg)
+            # if trial is not None:
+            #     intermediate_value = float(val_metrics.loss)
+            #     trial.report(intermediate_value, step=epoch)
+            #
+            #     if trial.should_prune():
+            #         msg = (
+            #             f"Pruned at epoch {epoch + 1} "
+            #             f"with mcc={intermediate_value:.4f}"
+            #         )
+            #         raise optuna.TrialPruned(msg)
 
             if self.training_components.early_stopping.early_stop:
                 logger.info("Early stopping triggered.")

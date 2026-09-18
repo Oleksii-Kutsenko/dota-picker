@@ -98,6 +98,7 @@ class HeroEmbedding(nn.Module):
         )
         self.team_embedding = nn.Embedding(2, params.d_model)
         self.phase_embedding = nn.Embedding(4, params.d_model)
+        self.is_my_hero_embedding = nn.Embedding(2, params.d_model)
         self.norm = nn.LayerNorm(params.d_model)
         self.dropout = nn.Dropout(params.dropout_rate)
 
@@ -106,6 +107,7 @@ class HeroEmbedding(nn.Module):
         draft_sequence: torch.Tensor,
         slot_team_ids: torch.Tensor,
         slot_phase_ids: torch.Tensor,
+        is_my_hero_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hero_stats = self.hero_static_features[draft_sequence]
         hero_stat_features = self.stat_projection(hero_stats)
@@ -113,12 +115,14 @@ class HeroEmbedding(nn.Module):
 
         team_features = self.team_embedding(slot_team_ids)
         phase_features = self.phase_embedding(slot_phase_ids)
+        my_hero_features = self.is_my_hero_embedding(is_my_hero_ids)
 
         hero_tokens = self.norm(
             hero_stat_features
             + hero_identities
             + team_features
-            + phase_features,
+            + phase_features
+            + my_hero_features
         )
         hero_tokens = self.dropout(hero_tokens)
 
@@ -186,13 +190,20 @@ class MatchWinPredictor(nn.Module):
         self,
         draft_sequence: torch.Tensor,
         patch_id: torch.Tensor,
+        picked_hero: torch.Tensor,
     ) -> torch.Tensor:
         batch_size = draft_sequence.size(0)
+
+        is_my_hero_ids = (
+            (draft_sequence == picked_hero.unsqueeze(1))
+            & (picked_hero.unsqueeze(1) != 0)
+        ).long()
 
         hero_tokens, hero_padding = self.hero_embedding(
             draft_sequence,
             self.slot_team_ids,
             self.slot_phase_ids,
+            is_my_hero_ids,
         )
 
         patch_context = self.patch_projection(patch_id).unsqueeze(1)

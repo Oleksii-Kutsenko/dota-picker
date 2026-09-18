@@ -69,6 +69,13 @@ def train_from_tuning() -> None:
     )
     module.main()
 
+@cli.command()
+def parameter_distribution() -> None:
+    module = importlib.import_module(
+        "dota_hero_picker.parameter_distribution"
+    )
+    module.main()
+
 
 if __name__ == "__main__":
     cli()

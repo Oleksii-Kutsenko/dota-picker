@@ -61,38 +61,39 @@ def parse_trial(
             num_heroes=trainer.hero_data_manager.get_heroes_number(),
             num_patches=get_patches_number(),
         ),
+        d_model=int(trial_row["params_d_model"]),
         num_layers=int(trial_row["params_num_layers"]),
         num_heads=int(trial_row["params_num_heads"]),
         ffn_ratio=int(trial_row["params_ffn_ratio"]),
-        d_model=int(trial_row["params_d_model"]),
-        hidden_dim=int(trial_row.get("params_hidden_dim", 128)),
+        hidden_dim=int(trial_row["params_hidden_dim"]),
+        activation=ActivationEnum(trial_row["params_activation"]),
         dropout_rate=float(trial_row["params_dropout_rate"]),
         patch_embedding_dim=int(trial_row["params_patch_embedding_dim"]),
         stat_projection_activation=ActivationEnum(
             trial_row["params_stat_projection_activation"],
         ),
-        activation=ActivationEnum(trial_row["params_activation"]),
     )
     training_args = TrainingArguments(
         data=TrainingData(
             train_dataset=trainer.data_manager.train_dataset,
             val_dataset=trainer.data_manager.val_dataset,
         ),
-        early_stopping_patience=int(
-            trial_row["params_early_stopping_patience"]
-        ),
+        batch_size=int(trial_row["params_batch_size"]),
+        decision_weight=int(trial_row["params_decision_weight"]),
         optimizer_parameters=OptimizerParameters(
             lr=float(trial_row["params_lr"]),
             weight_decay=float(trial_row["params_weight_decay"]),
         ),
         scheduler_parameters=SchedulerParameters(
+            scheduler_patience=int(trial_row["params_scheduler_patience"]),
             factor=float(trial_row["params_factor"]),
             threshold=float(trial_row["params_threshold"]),
-            scheduler_patience=int(trial_row["params_scheduler_patience"]),
         ),
-        batch_size=int(trial_row["params_batch_size"]),
-        decision_weight=int(trial_row["params_decision_weight"]),
+        early_stopping_patience=int(
+            trial_row["params_early_stopping_patience"]
+        ),
     )
+
     model = MatchWinPredictor(
         model_params,
         trainer.hero_data_manager.get_hero_features_matrix(),
@@ -105,16 +106,15 @@ def train_best_model(csv_file_path: Path) -> None:
     study = optuna.load_study(
         study_name=study_name, storage=settings.OPTUNA_STORAGE
     )
+
     trials_df = study.trials_dataframe()
     completed = trials_df[trials_df["state"] == "COMPLETE"]
-    if completed.empty:
-        raise RuntimeError(
-            f"No completed trials found in study '{study_name}'."
-        )
 
-    ascending = study.direction == optuna.study.StudyDirection.MINIMIZE
-    top_trials = completed.sort_values("value", ascending=ascending).head(
-        TOP_K_CANDIDATES
+    pareto_ids = {t.number for t in study.best_trials}
+    top_trials = (
+        completed[completed["number"].isin(pareto_ids)]
+        .sort_values("values_0")
+        .head(TOP_K_CANDIDATES)
     )
 
     trainer = ModelTrainer(csv_file_path, random_state=42)
@@ -127,7 +127,7 @@ def train_best_model(csv_file_path: Path) -> None:
 
     for rank, (_, trial_row) in enumerate(top_trials.iterrows(), start=1):
         trial_num = int(trial_row["number"])
-        optuna_val = float(trial_row["value"])
+        optuna_val = float(trial_row["values_0"])
         seed_aucs = []
 
         for seed in SEEDS:

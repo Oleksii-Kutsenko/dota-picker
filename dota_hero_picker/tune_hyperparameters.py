@@ -1,3 +1,4 @@
+import gc
 import logging
 import uuid
 from collections.abc import Callable
@@ -5,6 +6,7 @@ from pathlib import Path
 
 import optuna
 import pandas as pd
+import torch
 from optuna import Trial
 
 import settings
@@ -33,11 +35,10 @@ hero_data_manager = HeroDataManager()
 
 def create_objective(
     model_trainer: ModelTrainer,
-) -> Callable[[Trial], float]:
-    def objective(trial: Trial) -> float:
-
-        patch_embedding_dim = trial.suggest_categorical(
-            "patch_embedding_dim",
+) -> Callable[[Trial], tuple[float, int]]:
+    def objective(trial: Trial) -> tuple[float, int]:
+        d_model = trial.suggest_categorical(
+            "d_model",
             [
                 4,
                 8,
@@ -49,27 +50,7 @@ def create_objective(
                 512,
             ],
         )
-        stat_projection_activation = trial.suggest_categorical(
-            "stat_projection_activation",
-            [activation.value for activation in ActivationEnum],
-        )
-        activation = trial.suggest_categorical(
-            "activation",
-            [activation.value for activation in ActivationEnum],
-        )
-        d_model = trial.suggest_categorical(
-            "d_model",
-            [
-                8,
-                16,
-                32,
-                64,
-                128,
-                256,
-                512,
-            ],
-        )
-        num_layers = trial.suggest_int("num_layers", 1, 4)
+        num_layers = trial.suggest_int("num_layers", 1, 6)
         num_heads = trial.suggest_categorical(
             "num_heads",
             [
@@ -77,6 +58,8 @@ def create_objective(
                 2,
                 4,
                 8,
+                16,
+                32,
             ],
         )
         ffn_ratio = trial.suggest_categorical(
@@ -86,23 +69,88 @@ def create_objective(
                 2,
                 4,
                 8,
+                16,
+                32,
             ],
         )
-        hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+        hidden_dim = trial.suggest_categorical(
+            "hidden_dim", [32, 64, 128, 256, 512, 1024, 2048]
+        )
+        activation = trial.suggest_categorical(
+            "activation",
+            [activation.value for activation in ActivationEnum],
+        )
         dropout_rate = trial.suggest_float(
             "dropout_rate",
-            0.25,
-            0.5,
+            0.10,
+            0.55,
         )
+
+        patch_embedding_dim = trial.suggest_categorical(
+            "patch_embedding_dim",
+            [
+                2,
+                4,
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+            ],
+        )
+        stat_projection_activation = trial.suggest_categorical(
+            "stat_projection_activation",
+            [activation.value for activation in ActivationEnum],
+        )
+
+        batch_size = trial.suggest_categorical(
+            "batch_size",
+            [
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                2048,
+                4096,
+                8192,
+            ],
+        )
+        lr = trial.suggest_float("lr", 1e-6, 1e-1, log=True)
+        weight_decay = trial.suggest_float(
+            "weight_decay",
+            1e-7,
+            1e-2,
+            log=True,
+        )
+        decision_weight = trial.suggest_int("decision_weight", 13, 24)
+
         scheduler_patience = trial.suggest_int(
             "scheduler_patience",
-            4,
-            13,
+            2,
+            15,
+        )
+        factor = trial.suggest_float(
+            "factor",
+            0.5,
+            0.85,
+        )
+        threshold = trial.suggest_float(
+            "threshold",
+            1e-8,
+            1e-2,
+            log=True,
         )
         early_stopping_patience = trial.suggest_int(
             "early_stopping_patience",
-            6,
-            17,
+            7,
+            19,
         )
 
         training_arguments = TrainingArguments(
@@ -112,42 +160,16 @@ def create_objective(
             ),
             early_stopping_patience=(early_stopping_patience),
             optimizer_parameters=OptimizerParameters(
-                lr=trial.suggest_float("lr", 1e-4, 1e-2, log=True),
-                weight_decay=trial.suggest_float(
-                    "weight_decay",
-                    1e-4,
-                    1e-1,
-                    log=True,
-                ),
+                lr=lr,
+                weight_decay=weight_decay,
             ),
             scheduler_parameters=SchedulerParameters(
-                factor=trial.suggest_float(
-                    "factor",
-                    0.55,
-                    0.75,
-                ),
-                threshold=trial.suggest_float(
-                    "threshold",
-                    1e-5,
-                    1e-3,
-                    log=True,
-                ),
+                factor=factor,
+                threshold=threshold,
                 scheduler_patience=scheduler_patience,
             ),
-            batch_size=trial.suggest_categorical(
-                "batch_size",
-                [
-                    16,
-                    32,
-                    64,
-                    128,
-                    256,
-                    512,
-                    1024,
-                    2048,
-                ],
-            ),
-            decision_weight=trial.suggest_int("decision_weight", 14, 22),
+            batch_size=batch_size,
+            decision_weight=decision_weight,
         )
 
         if d_model % num_heads != 0:
@@ -176,21 +198,28 @@ def create_objective(
         )
 
         trainable_params = count_trainable_params(model)
-        trial.set_user_attr("model_trainable_params", trainable_params)
 
-        model_trainer.setup_custom_training(model, training_arguments)
-        model_trainer.train_model(
-            trial=trial,
-        )
+        try:
+            model_trainer.setup_custom_training(model, training_arguments)
+            model_trainer.train_model(trial=trial)
+        except torch.OutOfMemoryError:
+            logger.warning(
+                "CUDA OOM encountered. Pruning trial and clearing cache."
+            )
+            gc.collect()
+            torch.cuda.empty_cache()
+            raise optuna.TrialPruned("CUDA OOM")
 
         assert model_trainer.training_components is not None
         assert (
             model_trainer.training_components.early_stopping.best_metrics
             is not None
         )
-        return float(
-            model_trainer.training_components.early_stopping.best_metrics.loss,
+
+        val_loss = float(
+            model_trainer.training_components.early_stopping.best_metrics.loss
         )
+        return val_loss, trainable_params
 
     return objective
 
@@ -210,29 +239,23 @@ def main(csv_file_path: Path) -> None:
 
     study = optuna.create_study(
         study_name=study_name,
-        direction="minimize",
+        directions=["minimize", "minimize"],
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
         ),
-        pruner=optuna.pruners.MedianPruner(
-            n_startup_trials=10,
-            n_warmup_steps=12,
-            interval_steps=1,
-        ),
+        # pruner=optuna.pruners.MedianPruner(
+        #     n_startup_trials=10,
+        #     n_warmup_steps=10,
+        #     interval_steps=1,
+        # ),
         storage=settings.OPTUNA_STORAGE,
         load_if_exists=True,
     )
 
     study.optimize(
         objective,
-        n_trials=250,
+        n_trials=340,
         show_progress_bar=True,
     )
-    fig = optuna.visualization.plot_optimization_history(study)
-    fig.write_html("optimization_history.html")
-
-    fig2 = optuna.visualization.plot_param_importances(study)
-    fig2.write_html("param_importances.html")
-
     trials_df = study.trials_dataframe()
     trials_df.to_csv("optuna_trials.csv", index=False)

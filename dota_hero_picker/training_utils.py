@@ -53,6 +53,7 @@ TrainingExample = tuple[
     torch.Tensor,  # patch_id
     torch.Tensor,  # win
     torch.Tensor,  # is_my_decision
+    torch.Tensor,  # picked hero
 ]
 
 
@@ -83,6 +84,9 @@ class DotaDataset(Dataset[TrainingExample]):
             dtype=torch.long,
             device=device,
         )
+        self.picked_heroes = torch.tensor(
+            dataframe["picked_hero"].values, dtype=torch.long, device=device
+        )
 
     def __len__(self) -> int:
         """Return dataset length."""
@@ -94,6 +98,7 @@ class DotaDataset(Dataset[TrainingExample]):
             self.patch_ids[index],
             self.wins[index],
             self.is_my_decisions[index],
+            self.picked_heroes[index],
         )
 
 
@@ -150,9 +155,9 @@ def process_evaluation_batch(
     batch_data: TrainingExample,
     criterion: nn.BCEWithLogitsLoss,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    draft_sequence, patch_id, is_win, *_ = batch_data
+    draft_sequence, patch_id, is_win, *_, picked_hero = batch_data
 
-    outputs = model(draft_sequence, patch_id)
+    outputs = model(draft_sequence, patch_id, picked_hero)
     per_sample_loss = criterion(outputs, is_win)
     loss = per_sample_loss.mean()
 
@@ -234,16 +239,13 @@ def process_training_batch(
     training_components: TrainingComponents,
     decision_weight: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    (
-        draft_sequence,
-        patch_id,
-        is_win,
-        is_my_decision,
-    ) = batch_data
+    (draft_sequence, patch_id, is_win, is_my_decision, picked_hero) = (
+        batch_data
+    )
 
     training_components.optimizer.zero_grad(set_to_none=True)
 
-    outputs = model(draft_sequence, patch_id)
+    outputs = model(draft_sequence, patch_id, picked_hero)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
 
@@ -273,8 +275,10 @@ def evaluate_model(
     all_probs_tensors: list[torch.Tensor] = []
 
     with torch.no_grad():
-        for draft_seq, patch_id, is_win, _ in loader:
-            scaled = model(draft_seq, patch_id).float() / temperature
+        for draft_seq, patch_id, is_win, _, picked_hero in loader:
+            scaled = (
+                model(draft_seq, patch_id, picked_hero).float() / temperature
+            )
             total_loss += criterion(scaled, is_win).sum().item()
             total_samples += is_win.numel()
 
@@ -408,9 +412,9 @@ def collect_logits_and_labels(
 
     with torch.no_grad():
         for batch_data in loader:
-            draft_sequence, patch_id, is_win, *_ = batch_data
+            draft_sequence, patch_id, is_win, *_, picked_hero = batch_data
 
-            outputs = model(draft_sequence, patch_id)
+            outputs = model(draft_sequence, patch_id, picked_hero)
             all_logits.append(outputs)
             all_labels.append(is_win)
 

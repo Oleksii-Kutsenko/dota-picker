@@ -142,9 +142,9 @@ def calculate_baseline_winrate(
     )
 
     with torch.no_grad():
-        logits = model(baseline_tensor, patch_tensor)
+        zero_picked_hero = torch.zeros(1, dtype=torch.long, device=device)
+        logits = model(baseline_tensor, patch_tensor, zero_picked_hero)
         return float(torch.sigmoid(logits / temperature).item())
-
 
 def get_recommendations(
     team_picks: list[str],
@@ -175,8 +175,16 @@ def get_recommendations(
         device=device,
     )
 
+    candidate_ids = torch.tensor(
+        [
+            hero_data_manager.get_hero_id_by_localized_name(c)
+            for c in candidates
+        ],
+        dtype=torch.long,
+        device=device,
+    )
     with torch.no_grad():
-        logits = model(draft_tensor, patch_tensor)
+        logits = model(draft_tensor, patch_tensor, candidate_ids)
         probs = torch.sigmoid(logits / temperature).cpu().numpy().flatten()
 
     baseline = calculate_baseline_winrate(team_picks, opponent_picks)

@@ -2,3 +2,34 @@ Add Empty Hero slot embedding
 Before:
 Val AUC: 0.5692 | Test AUC: 0.5618 | Test Loss: 0.6875 | ECE: 0.0435 | Temp: 0.100
 After:
+Val AUC: 0.5883 | Test AUC: 0.4783 | Test Loss: 0.6931 | ECE: 0.0088 | Temp: 1.153
+Decision: Rejected
+
+is_my_hero_embedding
+Before:
+Val AUC: 0.6135 | Test AUC: 0.5188 | Test Loss: 0.6944 | ECE: 0.0374 | Temp: 0.542
+After:
+Val AUC: 0.5809 | Test AUC: 0.5488 | Test Loss: 0.6963 | ECE: 0.0564 | Temp: 1.600
+Decision: Approved
+
+Add a 2-state map side embedding to each slot so self-attention learns hero performance relative to Radiant vs. Dire map geometry and global winrate disparity.
+
+
+Replace empty slot tokens with a draft step embedding on the decision token so the model knows the draft stage without diluting hero attention.
+
+Concatenate the is_my_hero flag into hero_stats before stat_projection so the player's pick non-linearly modulates the hero's actual attributes.
+
+Switch Optuna to multi-objective optimization minimizing both validation loss and parameter count to find compact, Pareto-optimal models that resist overfitting.
+Before:
+Val AUC: 0.5655 | Test AUC: 0.4678 | Test Loss: 0.7048 | ECE: 0.0977 | Temp: 0.452
+After:
+Val AUC: 0.6079 | Test AUC: 0.5062 | Test Loss: 0.7054 | ECE: 0.0936 | Temp: 0.999
+Decision: Approved
+
+Split the sequence into allied and enemy pools using self-attention for team synergy and cross-attention for counter-picks.
+
+Add an auxiliary classification head that predicts randomly masked heroes during training to provide dense draft-coherence supervision beyond noisy win labels.
+
+Inject OpenDota's pairwise hero advantage matrix as an attention bias so the Transformer directly prioritizes known counter-pick relationships.
+
+Replace the binary is_my_hero embedding with an in-slot hero skill profile that injects the player's personal mastery into their pick while using the average player performance baseline for all other lobby heroes.

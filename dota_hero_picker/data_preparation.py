@@ -51,6 +51,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
                     "win": row["win"],
                     "is_my_decision": int(my_picked_hero == current_hero_pick),
                     "patch_id": row["patch_id"],
+                    "picked_hero": my_picked_hero,
                 },
             )
             augmented_records.append(prefix_record)
@@ -80,6 +81,7 @@ def create_augmented_dataframe(train_dataframe: pd.DataFrame) -> pd.DataFrame:
                     "win": 1 - row["win"],
                     "is_my_decision": 0,
                     "patch_id": row["patch_id"],
+                    "picked_hero": 0,
                 },
             )
             augmented_records.append(prefix_record)
@@ -117,6 +119,7 @@ def prepare_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
                 "win": row["win"],
                 "is_my_decision": 1,
                 "patch_id": row["patch_id"],
+                "picked_hero": row["picked_hero"],
             },
         )
         prepared_records.append(prefix_record)
