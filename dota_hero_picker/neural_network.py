@@ -5,6 +5,7 @@ from typing import Any, Self
 
 import numpy as np
 import torch
+import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
 SEQ_LEN = 9
@@ -76,6 +77,8 @@ class ModelParameters:
 
 
 class HeroEmbedding(nn.Module):
+    hero_static_features: torch.Tensor
+
     def __init__(
         self,
         params: ModelParameters,
@@ -87,7 +90,7 @@ class HeroEmbedding(nn.Module):
             torch.from_numpy(hero_features_matrix).float(),
         )
         self.stat_projection = nn.Sequential(
-            nn.Linear(params.data_dimensions.num_features, params.d_model),
+            nn.Linear(params.data_dimensions.num_features + 1, params.d_model),
             ACTIVATION_MODULES[params.stat_projection_activation](),
             nn.Linear(params.d_model, params.d_model),
         )
@@ -98,7 +101,6 @@ class HeroEmbedding(nn.Module):
         )
         self.team_embedding = nn.Embedding(2, params.d_model)
         self.phase_embedding = nn.Embedding(4, params.d_model)
-        self.is_my_hero_embedding = nn.Embedding(2, params.d_model)
         self.norm = nn.LayerNorm(params.d_model)
         self.dropout = nn.Dropout(params.dropout_rate)
 
@@ -109,20 +111,24 @@ class HeroEmbedding(nn.Module):
         slot_phase_ids: torch.Tensor,
         is_my_hero_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hero_stats = self.hero_static_features[draft_sequence]
+        hero_stats = torch.cat(
+            [
+                self.hero_static_features[draft_sequence],
+                is_my_hero_ids.unsqueeze(-1).float(),
+            ],
+            dim=-1,
+        )
         hero_stat_features = self.stat_projection(hero_stats)
         hero_identities = self.hero_identity_embedding(draft_sequence)
 
         team_features = self.team_embedding(slot_team_ids)
         phase_features = self.phase_embedding(slot_phase_ids)
-        my_hero_features = self.is_my_hero_embedding(is_my_hero_ids)
 
         hero_tokens = self.norm(
             hero_stat_features
             + hero_identities
             + team_features
-            + phase_features
-            + my_hero_features
+            + phase_features,
         )
         hero_tokens = self.dropout(hero_tokens)
 
@@ -220,12 +226,7 @@ class MatchWinPredictor(nn.Module):
 
         sequence_tokens = torch.cat([decision_tokens, hero_tokens], dim=1)
 
-        decision_padding = torch.zeros(
-            (batch_size, 1),
-            dtype=torch.bool,
-            device=draft_sequence.device,
-        )
-        padding_mask = torch.cat([decision_padding, hero_padding], dim=1)
+        padding_mask = F.pad(hero_padding, (1, 0), value=False)
 
         encoded_sequence = self.transformer(
             sequence_tokens,
@@ -233,4 +234,4 @@ class MatchWinPredictor(nn.Module):
         )
 
         decision_state = encoded_sequence[:, 0]
-        return self.classifier(decision_state).squeeze(-1)
+        return self.classifier(decision_state).squeeze(-1)  # type: ignore[no-any-return]

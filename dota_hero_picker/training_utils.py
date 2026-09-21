@@ -1,20 +1,14 @@
-import copy
 import logging
-from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Self
+from typing import Self
 
 import numpy as np
 import pandas as pd
 import torch
-from scipy.optimize import minimize_scalar
-from sklearn.metrics import (
-    f1_score,
-)
 from torch import nn, optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 from torchmetrics import MetricCollection
 from torchmetrics.classification import (
     BinaryAUROC,
@@ -29,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-MID_POINT = 0.5
+EARLY_STOPPING_PATIENCE = 6
 
 
 def count_trainable_params(model: nn.Module) -> int:
@@ -85,7 +79,9 @@ class DotaDataset(Dataset[TrainingExample]):
             device=device,
         )
         self.picked_heroes = torch.tensor(
-            dataframe["picked_hero"].values, dtype=torch.long, device=device
+            dataframe["picked_hero"].values,
+            dtype=torch.long,
+            device=device,
         )
 
     def __len__(self) -> int:
@@ -109,16 +105,37 @@ class ShuffleEnum(Enum):
     UNSHUFFLED = False
 
 
-def get_data_loader(
-    dataset: Dataset[TrainingExample],
-    batch_size: int,
-    shuffle: ShuffleEnum = ShuffleEnum.SHUFFLED,
-) -> DataLoader[TrainingExample]:
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle.value,
-    )
+class DotaBatchLoader:
+    def __init__(
+        self,
+        dataset: DotaDataset,
+        batch_size: int,
+        shuffle: ShuffleEnum = ShuffleEnum.SHUFFLED,
+    ) -> None:
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle.value
+        self.num_samples = len(dataset)
+
+    def __len__(self) -> int:
+        return (self.num_samples + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self) -> Iterator[TrainingExample]:
+        device = self.dataset.draft_sequences.device
+        indices = (
+            torch.randperm(self.num_samples, device=device)
+            if self.shuffle
+            else torch.arange(self.num_samples, device=device)
+        )
+        for start_idx in range(0, self.num_samples, self.batch_size):
+            batch_indices = indices[start_idx : start_idx + self.batch_size]
+            yield (
+                self.dataset.draft_sequences[batch_indices],
+                self.dataset.patch_ids[batch_indices],
+                self.dataset.wins[batch_indices],
+                self.dataset.is_my_decisions[batch_indices],
+                self.dataset.picked_heroes[batch_indices],
+            )
 
 
 @dataclass
@@ -171,29 +188,53 @@ class EarlyStoppingMode(Enum):
     MAX = "max"
 
 
-class EarlyStopping:
-    """Simple early stopping."""
+class EarlyStoppingStateError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__(
+            "Early stopping has no recorded best state or metrics.",
+        )
 
+
+class EarlyStopping:
     def __init__(
         self,
-        patience: int = 5,
-        delta: float = 0,
-        mode: EarlyStoppingMode = EarlyStoppingMode.MAX,
+        patience: int = 7,
+        delta: float = 1e-4,
+        mode: EarlyStoppingMode = EarlyStoppingMode.MIN,
     ) -> None:
         self.patience = patience
         self.delta = delta
         self.mode = mode
-        self.best_score: float | None = None
-        self.best_metrics: MetricsResult | None = None
         self.early_stop = False
         self.counter = 0
-        self.best_model_state: dict[str, Any] | None = None
+
+        self._best_score: float | None = None
+        self._best_metrics: MetricsResult | None = None
+        self._best_model_state: dict[str, torch.Tensor] | None = None
+
+    @property
+    def best_metrics(self) -> MetricsResult:
+        if self._best_metrics is None:
+            raise EarlyStoppingStateError
+        return self._best_metrics
+
+    @property
+    def best_model_state(self) -> dict[str, torch.Tensor]:
+        if self._best_model_state is None:
+            raise EarlyStoppingStateError
+        return self._best_model_state
+
+    @property
+    def best_score(self) -> float:
+        if self._best_score is None:
+            raise EarlyStoppingStateError
+        return self._best_score
 
     def _is_improvement(self, score: float) -> bool:
-        assert self.best_score is not None
+        assert self._best_score is not None
         if self.mode == EarlyStoppingMode.MAX:
-            return score > self.best_score + self.delta
-        return score < self.best_score - self.delta
+            return score > self._best_score + self.delta
+        return score < self._best_score - self.delta
 
     def __call__(
         self,
@@ -201,10 +242,13 @@ class EarlyStopping:
         metrics: MetricsResult,
         model: nn.Module,
     ) -> None:
-        if self.best_score is None or self._is_improvement(score):
-            self.best_score = score
-            self.best_metrics = metrics
-            self.best_model_state = copy.deepcopy(model.state_dict())
+        if self._best_score is None or self._is_improvement(score):
+            self._best_score = score
+            self._best_metrics = metrics
+            self._best_model_state = {
+                k: v.detach().cpu().clone()
+                for k, v in model.state_dict().items()
+            }
             self.counter = 0
         else:
             self.counter += 1
@@ -212,9 +256,6 @@ class EarlyStopping:
                 self.early_stop = True
 
     def load_best_model(self, model: nn.Module) -> None:
-        if self.best_model_state is None:
-            msg = "Unexpected state"
-            raise RuntimeError(msg)
         model.load_state_dict(self.best_model_state)
 
 
@@ -238,7 +279,7 @@ def process_training_batch(
     batch_data: TrainingExample,
     training_components: TrainingComponents,
     decision_weight: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     (draft_sequence, patch_id, is_win, is_my_decision, picked_hero) = (
         batch_data
     )
@@ -257,20 +298,25 @@ def process_training_batch(
     loss = (per_sample_loss * decision_weights).sum() / decision_weights.sum()
 
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    torch.nn.utils.clip_grad_norm_(
+        model.parameters(),
+        max_norm=1.0,
+        foreach=True,
+    )
     training_components.optimizer.step()
 
-    return loss.detach(), outputs.detach(), is_win
+    return loss.detach()  # type: ignore[no-any-return]
 
 
 def evaluate_model(
     model: nn.Module,
-    loader: DataLoader[TrainingExample],
+    loader: DotaBatchLoader,
     criterion: nn.BCEWithLogitsLoss,
     temperature: float,
 ) -> tuple[MetricsResult, np.ndarray]:
     model.eval()
-    total_loss, total_samples = 0.0, 0
+    total_loss: torch.Tensor | None = None
+    total_samples = 0
     metrics_collection = get_metrics_collection()
     all_probs_tensors: list[torch.Tensor] = []
 
@@ -279,7 +325,10 @@ def evaluate_model(
             scaled = (
                 model(draft_seq, patch_id, picked_hero).float() / temperature
             )
-            total_loss += criterion(scaled, is_win).sum().item()
+            batch_loss = criterion(scaled, is_win).sum()
+            total_loss = (
+                batch_loss if total_loss is None else (total_loss + batch_loss)
+            )
             total_samples += is_win.numel()
 
             probs = torch.sigmoid(scaled)
@@ -287,7 +336,9 @@ def evaluate_model(
             metrics_collection.update(probs, is_win)
 
     all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
-    avg_loss = total_loss / total_samples
+    avg_loss = (
+        (total_loss / total_samples).item() if total_loss is not None else 0.0
+    )
     return MetricsResult.from_collection(
         avg_loss,
         metrics_collection.compute(),
@@ -296,38 +347,30 @@ def evaluate_model(
 
 def train_step(
     model: nn.Module,
-    train_loader: DataLoader[TrainingExample],
+    train_loader: DotaBatchLoader,
     training_components: TrainingComponents,
     decision_weight: int,
-) -> tuple[MetricsResult, np.ndarray]:
+) -> float:
     model.train()
-
-    all_losses: list[torch.Tensor] = []
-    all_probs_tensors: list[torch.Tensor] = []
-    metrics_collection = get_metrics_collection()
+    total_loss: torch.Tensor | None = None
+    num_batches = 0
 
     for batch_data in train_loader:
-        batch_loss, outputs, is_win = process_training_batch(
+        batch_loss = process_training_batch(
             model,
             batch_data,
             training_components,
             decision_weight,
         )
+        total_loss = (
+            batch_loss if total_loss is None else (total_loss + batch_loss)
+        )
+        num_batches += 1
 
-        all_losses.append(batch_loss)
+    if total_loss is None or num_batches == 0:
+        return 0.0
 
-        with torch.no_grad():
-            probs = torch.sigmoid(outputs)
-            all_probs_tensors.append(probs)
-            metrics_collection.update(probs, is_win)
-
-    all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
-
-    avg_loss = torch.stack(all_losses).mean().item()
-    return MetricsResult.from_collection(
-        avg_loss,
-        metrics_collection.compute(),
-    ), all_probs
+    return (total_loss / num_batches).item()
 
 
 @dataclass
@@ -359,86 +402,10 @@ class OptimizerParameters:
 class TrainingArguments:
     """Stores data for training."""
 
-    early_stopping_patience: int
     scheduler_parameters: SchedulerParameters
     optimizer_parameters: OptimizerParameters
     batch_size: int
     decision_weight: int
     data: TrainingData
-    pos_weight: torch.Tensor | None = None
     epochs: int = 75
-
-
-def compute_baseline_f1(
-    y_train: "pd.Series[float]",
-    y_val: "pd.Series[float]",
-) -> None:
-    # Determine majority class from training data
-    counter = Counter(y_train)
-    majority_class = counter.most_common(1)[0][0]
-
-    # Predict majority class for all validation samples
-    y_pred_baseline = [majority_class] * len(y_val)
-
-    # Compute F1-score for the baseline (using pos_label=1 for win prediction)
-    baseline_f1: float = f1_score(
-        y_val,
-        y_pred_baseline,
-        average="macro",
-    )
-
-    # Also compute class distribution for context
-    train_dist = {k: round(v / len(y_train), 4) for k, v in counter.items()}
-    val_counter = Counter(y_val)
-    val_dist = {k: round(v / len(y_val), 4) for k, v in val_counter.items()}
-
-    logger.info(
-        "Baseline F1-score "
-        f"(always predict majority class {majority_class}): "
-        f"{baseline_f1:.4f}",
-    )
-    logger.info(f"Training class distribution: {train_dist}")
-    logger.info(f"Validation class distribution: {val_dist}")
-
-
-def collect_logits_and_labels(
-    model: nn.Module,
-    loader: DataLoader[TrainingExample],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Collect raw logits and true labels from a data loader."""
-    model.eval()
-    all_logits: list[torch.Tensor] = []
-    all_labels: list[torch.Tensor] = []
-
-    with torch.no_grad():
-        for batch_data in loader:
-            draft_sequence, patch_id, is_win, *_, picked_hero = batch_data
-
-            outputs = model(draft_sequence, patch_id, picked_hero)
-            all_logits.append(outputs)
-            all_labels.append(is_win)
-
-    logits = torch.cat(all_logits).cpu().numpy().flatten()
-    labels = torch.cat(all_labels).cpu().numpy().flatten()
-    return logits, labels
-
-
-def fit_temperature(
-    logits: np.ndarray,
-    labels: np.ndarray,
-) -> float:
-    """Fit Platt scaling temperature to minimize NLL on validation logits."""
-
-    def nll(temperature: float) -> float:
-        scaled = logits / temperature
-        probs = 1.0 / (1.0 + np.exp(-scaled))
-        probs = np.clip(probs, 1e-7, 1 - 1e-7)
-        return float(
-            -np.mean(
-                labels * np.log(probs) + (1 - labels) * np.log(1 - probs),
-            ),
-        )
-
-    result = minimize_scalar(nll, bounds=(0.1, 10.0), method="bounded")
-    logger.info(f"Fitted temperature: {result.x:.4f}")
-    return float(result.x)
+    early_stopping_patience: int = EARLY_STOPPING_PATIENCE

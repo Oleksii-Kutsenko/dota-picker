@@ -1,38 +1,22 @@
 import logging
-from pathlib import Path
 
-import optuna
+import numpy as np
 import torch
+from scipy.optimize import minimize_scalar
 from torch import nn, optim
-from torch.utils.data import DataLoader
 
-import settings
-from dota_hero_picker.hero_data_manager import HeroDataManager
-
-from .data_manager import DataManager
-from .neural_network import (
-    ActivationEnum,
-    DataDimensions,
-    MatchWinPredictor,
-    ModelParameters,
-)
-from .patch_resolver import get_patches_number
-from .training_utils import (
+from dota_hero_picker.data_manager import DataManager
+from dota_hero_picker.training_utils import (
+    DotaBatchLoader,
     EarlyStopping,
     EarlyStoppingMode,
+    EarlyStoppingStateError,
     MetricsResult,
-    OptimizerParameters,
-    SchedulerParameters,
     ShuffleEnum,
     TrainingArguments,
     TrainingComponents,
-    TrainingData,
-    TrainingExample,
-    collect_logits_and_labels,
     count_trainable_params,
     evaluate_model,
-    fit_temperature,
-    get_data_loader,
     train_step,
 )
 
@@ -43,105 +27,58 @@ logger = logging.getLogger(__name__)
 class ModelTrainer:
     """Class responsible for model training."""
 
-    hero_data_manager = HeroDataManager()
-
-    def __init__(self, csv_file_path: Path, random_state: int = 42) -> None:
-        self.random_state = random_state
-
-        self.data_manager = DataManager(
-            csv_file_path,
-            self.hero_data_manager,
-            random_state,
-        )
-
-        self.model: nn.Module | None = None
-        self.training_arguments: TrainingArguments | None = None
-        self.training_components: TrainingComponents | None = None
-
-    def setup_default_training(self) -> None:
-        self.model = self.create_default_model()
-        self.training_arguments = self.create_default_training_arguments()
-
-        logger.info(
-            "Model trainable parameters: "
-            f"{count_trainable_params(self.model)}",
-        )
-
-    def setup_custom_training(
+    def __init__(
         self,
         model: nn.Module,
         training_arguments: TrainingArguments,
+        data_manager: DataManager,
     ) -> None:
         self.model = model
         self.training_arguments = training_arguments
+        self.data_manager = data_manager
 
         logger.info(
-            "Model trainable parameters: "
-            f"{count_trainable_params(self.model)}",
+            f"Model trainable params: {count_trainable_params(self.model)}",
         )
+        self.model.to(device)
 
-    @classmethod
-    def create_default_model(cls) -> MatchWinPredictor:
-        params = ModelParameters(
-            activation=ActivationEnum.SILU,
-            data_dimensions=DataDimensions(
-                num_heroes=cls.hero_data_manager.get_heroes_number(),
-                num_patches=get_patches_number(),
-            ),
-            num_layers=3,
-            num_heads=2,
-            ffn_ratio=2,
-            d_model=128,
-            hidden_dim=128,
-            dropout_rate=0.3440335156445883,
-            patch_embedding_dim=8,
-            stat_projection_activation=ActivationEnum.RELU,
+        criterion = nn.BCEWithLogitsLoss(reduction="none")
+        optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=self.training_arguments.optimizer_parameters.lr,
+            weight_decay=self.training_arguments.optimizer_parameters.weight_decay,
+            fused=True,
         )
-        return MatchWinPredictor(
-            params,
-            cls.hero_data_manager.get_hero_features_matrix(),
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=self.training_arguments.scheduler_parameters.factor,
+            patience=self.training_arguments.scheduler_parameters.scheduler_patience,
+            threshold=self.training_arguments.scheduler_parameters.threshold,
         )
-
-    def create_default_training_arguments(
-        self,
-    ) -> TrainingArguments:
-        return TrainingArguments(
-            data=TrainingData(
-                train_dataset=self.data_manager.train_dataset,
-                val_dataset=self.data_manager.val_dataset,
-            ),
-            early_stopping_patience=7,
-            optimizer_parameters=OptimizerParameters(
-                lr=0.0009578678431815601,
-                weight_decay=0.00021702295544389735,
-            ),
-            scheduler_parameters=SchedulerParameters(
-                factor=0.6016957313572723,
-                scheduler_patience=6,
-                threshold=2.409466579096731e-05,
-            ),
-            decision_weight=14,
-            batch_size=128,
+        early_stopping = EarlyStopping(
+            patience=self.training_arguments.early_stopping_patience,
+            mode=EarlyStoppingMode.MIN,
+        )
+        self.training_components = TrainingComponents(
+            criterion=criterion,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            early_stopping=early_stopping,
         )
 
     def train_epoch(
         self,
         epoch: int,
-        train_loader: DataLoader[TrainingExample],
-        val_loader: DataLoader[TrainingExample],
-    ) -> tuple[MetricsResult, MetricsResult]:
-        assert self.training_arguments is not None
-        assert self.training_components is not None
-        assert self.model is not None
-        logger.info(f"Epoch {epoch + 1}/{self.training_arguments.epochs}")
-
-        train_metrics, _ = train_step(
+        train_loader: DotaBatchLoader,
+        val_loader: DotaBatchLoader,
+    ) -> tuple[float, MetricsResult]:
+        train_loss = train_step(
             self.model,
             train_loader,
             self.training_components,
             self.training_arguments.decision_weight,
         )
-        logger.info(train_metrics)
 
         val_metrics, _ = evaluate_model(
             self.model,
@@ -149,176 +86,102 @@ class ModelTrainer:
             self.training_components.criterion,
             1,
         )
-        logger.info(val_metrics)
-        self.training_components.scheduler.step(val_metrics.loss)
 
+        current_lr = self.training_components.optimizer.param_groups[0]["lr"]
+        logger.info(
+            f"Epoch {epoch + 1:02d}/{self.training_arguments.epochs:02d} | "
+            f"Train Loss: {train_loss:.4f} | "
+            f"Val Loss: {val_metrics.loss:.4f} | "
+            f"Val AUC: {val_metrics.auc:.4f} | "
+            f"Val MCC: {val_metrics.mcc:.4f} | "
+            f"LR: {current_lr:.2e}",
+        )
+
+        self.training_components.scheduler.step(val_metrics.loss)
         self.training_components.early_stopping(
             val_metrics.loss,
             val_metrics,
             self.model,
         )
-        return train_metrics, val_metrics
+        return train_loss, val_metrics
 
-    def train_model(
-        self,
-        trial: optuna.trial.Trial | None = None,
-    ) -> None:
-        assert self.model is not None
-        assert self.training_arguments is not None
-        self.model.to(device)
-
-        criterion = nn.BCEWithLogitsLoss(
-            reduction="none",
-            pos_weight=self.training_arguments.pos_weight
-            if self.training_arguments.pos_weight
-            else None,
-        )
-
-        optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=self.training_arguments.optimizer_parameters.lr,
-            weight_decay=self.training_arguments.optimizer_parameters.weight_decay,
-        )
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            "min",
-            factor=self.training_arguments.scheduler_parameters.factor,
-            threshold=self.training_arguments.scheduler_parameters.threshold,
-            patience=self.training_arguments.scheduler_parameters.scheduler_patience,
-        )
-
-        self.training_components = TrainingComponents(
-            criterion=criterion,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            early_stopping=EarlyStopping(
-                patience=self.training_arguments.early_stopping_patience,
-                mode=EarlyStoppingMode.MIN,
-            ),
-        )
-
-        train_loader = get_data_loader(
+    def train(self) -> EarlyStopping:
+        train_loader = DotaBatchLoader(
             self.training_arguments.data.train_dataset,
-            self.training_arguments.batch_size,
-            ShuffleEnum.SHUFFLED,
+            batch_size=self.training_arguments.batch_size,
+            shuffle=ShuffleEnum.SHUFFLED,
         )
-        val_loader = get_data_loader(
+        val_loader = DotaBatchLoader(
             self.training_arguments.data.val_dataset,
-            self.training_arguments.batch_size,
-            ShuffleEnum.UNSHUFFLED,
+            batch_size=512,
+            shuffle=ShuffleEnum.UNSHUFFLED,
         )
 
         for epoch in range(self.training_arguments.epochs):
-            _, val_metrics = self.train_epoch(
-                epoch,
-                train_loader,
-                val_loader,
-            )
-
-            # if trial is not None:
-            #     intermediate_value = float(val_metrics.loss)
-            #     trial.report(intermediate_value, step=epoch)
-            #
-            #     if trial.should_prune():
-            #         msg = (
-            #             f"Pruned at epoch {epoch + 1} "
-            #             f"with mcc={intermediate_value:.4f}"
-            #         )
-            #         raise optuna.TrialPruned(msg)
+            self.train_epoch(epoch, train_loader, val_loader)
 
             if self.training_components.early_stopping.early_stop:
                 logger.info("Early stopping triggered.")
                 break
 
+        early_stopping = self.training_components.early_stopping
         if (
-            self.training_components.early_stopping.best_score is None
-            or self.training_components.early_stopping.best_metrics is None
-            or self.training_components.early_stopping.best_model_state is None
+            early_stopping.best_score is None
+            or early_stopping.best_metrics is None
+            or early_stopping.best_model_state is None
         ):
-            msg = "Unexpected state"
-            raise RuntimeError(msg)
+            raise EarlyStoppingStateError
 
-        self.model.load_state_dict(
-            self.training_components.early_stopping.best_model_state,
-        )
+        self.model.load_state_dict(early_stopping.best_model_state)
+        return early_stopping
 
     def evaluate_on_test(self, temperature: float) -> MetricsResult:
-        if self.model is None or self.training_arguments is None:
-            msg = "Model must be trained before evaluation"
-            raise RuntimeError(msg)
-
-        criterion = nn.BCEWithLogitsLoss(
-            reduction="none",
-        )
-
-        test_loader = get_data_loader(
+        criterion = nn.BCEWithLogitsLoss(reduction="none")
+        test_loader = DotaBatchLoader(
             self.data_manager.test_dataset,
-            self.training_arguments.batch_size,
-            ShuffleEnum.UNSHUFFLED,
+            batch_size=self.training_arguments.batch_size,
+            shuffle=ShuffleEnum.UNSHUFFLED,
         )
-
         metrics, _ = evaluate_model(
             self.model,
             test_loader,
             criterion,
             temperature,
         )
-
         return metrics
 
-    def main(self) -> None:
-        """Model training entrypoint."""
-        self.setup_default_training()
-        assert self.training_arguments is not None
-        assert self.model is not None
-
-        self.train_model()
-        assert self.training_components is not None
-
-        # 1. Calibrate temperature on validation set
-        val_loader = get_data_loader(
+    def calibrate_temperature(self) -> float:
+        val_loader = DotaBatchLoader(
             self.training_arguments.data.val_dataset,
-            self.training_arguments.batch_size,
-            ShuffleEnum.UNSHUFFLED,
+            batch_size=512,
+            shuffle=ShuffleEnum.UNSHUFFLED,
         )
-        val_logits, val_labels = collect_logits_and_labels(
-            self.model,
-            val_loader,
-        )
-        temperature = fit_temperature(val_logits, val_labels)
 
-        # 2. Evaluate on test set with calibrated temperature
-        test_metrics = self.evaluate_on_test(temperature)
+        self.model.eval()
+        all_logits: list[torch.Tensor] = []
+        all_labels: list[torch.Tensor] = []
 
-        logger.info("Test Metrics")
-        logger.info(test_metrics)
+        with torch.no_grad():
+            for batch_data in val_loader:
+                draft_sequence, patch_id, is_win, *_, picked_hero = batch_data
+                outputs = self.model(draft_sequence, patch_id, picked_hero)
+                all_logits.append(outputs)
+                all_labels.append(is_win)
 
-        logger.info("--- Confusion Matrix ---")
-        header = f"{'':<12}" + "Pred: Loss    " + "Pred: Win     "
-        logger.info(header)
-        row1 = (
-            f"Actual: Loss  {test_metrics.confusion_matrix[0, 0]:<12}"  # type: ignore[index]
-            f"{test_metrics.confusion_matrix[0, 1]:<13}"  # type: ignore[index]
-        )
-        row2 = (
-            f"Actual: Win   {test_metrics.confusion_matrix[1, 0]:<12}"  # type: ignore[index]
-            f"{test_metrics.confusion_matrix[1, 1]:<13}"  # type: ignore[index]
-        )
-        logger.info(row1)
-        logger.info(row2)
-        logger.info("------------------------")
+        logits = torch.cat(all_logits).cpu().numpy().flatten()
+        labels = torch.cat(all_labels).cpu().numpy().flatten()
 
-        # 3. Save full checkpoint dictionary
-        settings.MODELS_FOLDER_PATH.mkdir(parents=True, exist_ok=True)
-        save_path = settings.MODELS_FOLDER_PATH / Path("trained_model.pth")
-        torch.save(
-            {
-                "model_state": self.training_components.early_stopping.best_model_state,  # noqa: E501
-                "model_params": self.model.params.to_dict(),
-                "temperature": temperature,
-            },
-            save_path,
-        )
-        logger.info(
-            f"Training complete! Model saved to '{save_path}'.",
-        )
+        def nll(temp: float) -> float:
+            scaled = logits / temp
+            probs = 1.0 / (1.0 + np.exp(-scaled))
+            probs = np.clip(probs, 1e-7, 1 - 1e-7)
+            return float(
+                -np.mean(
+                    labels * np.log(probs) + (1 - labels) * np.log(1 - probs),
+                ),
+            )
+
+        result = minimize_scalar(nll, bounds=(0.1, 10.0), method="bounded")
+        temperature = float(result.x)
+        logger.info(f"Fitted temperature: {temperature:.4f}")
+        return temperature

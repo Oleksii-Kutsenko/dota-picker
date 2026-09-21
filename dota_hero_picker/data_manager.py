@@ -13,7 +13,6 @@ from .data_preparation import (
 )
 from .training_utils import (
     DotaDataset,
-    compute_baseline_f1,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,11 +97,6 @@ class DataManager:
 
         prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
         prepared_test_dataframe = prepare_dataframe(test_dataframe)
-
-        compute_baseline_f1(
-            augmented_train_dataframe["win"],
-            prepared_test_dataframe["win"],
-        )
 
         train_dataset = DotaDataset(augmented_train_dataframe)
         val_dataset = DotaDataset(prepared_validation_dataframe)

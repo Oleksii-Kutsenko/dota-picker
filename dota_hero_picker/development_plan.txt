@@ -13,11 +13,25 @@ Val AUC: 0.5809 | Test AUC: 0.5488 | Test Loss: 0.6963 | ECE: 0.0564 | Temp: 1.6
 Decision: Approved
 
 Add a 2-state map side embedding to each slot so self-attention learns hero performance relative to Radiant vs. Dire map geometry and global winrate disparity.
+Before:
+2026-09-20 21:29:19,322 - INFO - Champion: Trial #297
+2026-09-20 21:29:19,322 - INFO - Validation AUC: 0.5636
+2026-09-20 21:29:19,322 - INFO - Test AUC:       0.5362
+2026-09-20 21:29:19,322 - INFO - Test Loss:      0.6900
+2026-09-20 21:29:19,322 - INFO - Test MCC:       0.0098
+2026-09-20 21:29:19,323 - INFO - Test ECE:       0.0334
+2026-09-20 21:29:19,323 - INFO - Temperature:    0.615
+After:
 
 
 Replace empty slot tokens with a draft step embedding on the decision token so the model knows the draft stage without diluting hero attention.
 
 Concatenate the is_my_hero flag into hero_stats before stat_projection so the player's pick non-linearly modulates the hero's actual attributes.
+Before:
+Val AUC: 0.5656 | Test AUC: 0.4538 | Test Loss: 0.7070 | ECE: 0.0780 | Temp: 0.543
+After:
+Val AUC: 0.5552 | Test AUC: 0.5320 | Test Loss: 0.6934 | ECE: 0.0322 | Temp: 3.750
+Decision: Approved
 
 Switch Optuna to multi-objective optimization minimizing both validation loss and parameter count to find compact, Pareto-optimal models that resist overfitting.
 Before:
