@@ -17,6 +17,7 @@ from dota_hero_picker.training_utils import (
     TrainingComponents,
     count_trainable_params,
     evaluate_model,
+    predict_logits_and_labels,
     train_step,
 )
 
@@ -80,7 +81,7 @@ class ModelTrainer:
             self.training_arguments.decision_weight,
         )
 
-        val_metrics, _ = evaluate_model(
+        val_metrics = evaluate_model(
             self.model,
             val_loader,
             self.training_components.criterion,
@@ -105,7 +106,10 @@ class ModelTrainer:
         )
         return train_loss, val_metrics
 
-    def train(self) -> EarlyStopping:
+    def train(
+        self,
+        load_best_state: bool = True,  # noqa: FBT001, FBT002
+    ) -> EarlyStopping:
         train_loader = DotaBatchLoader(
             self.training_arguments.data.train_dataset,
             batch_size=self.training_arguments.batch_size,
@@ -132,7 +136,8 @@ class ModelTrainer:
         ):
             raise EarlyStoppingStateError
 
-        self.model.load_state_dict(early_stopping.best_model_state)
+        if load_best_state:
+            self.model.load_state_dict(early_stopping.best_model_state)
         return early_stopping
 
     def evaluate_on_test(self, temperature: float) -> MetricsResult:
@@ -142,13 +147,12 @@ class ModelTrainer:
             batch_size=self.training_arguments.batch_size,
             shuffle=ShuffleEnum.UNSHUFFLED,
         )
-        metrics, _ = evaluate_model(
+        return evaluate_model(
             self.model,
             test_loader,
             criterion,
             temperature,
         )
-        return metrics
 
     def calibrate_temperature(self) -> float:
         val_loader = DotaBatchLoader(
@@ -156,20 +160,12 @@ class ModelTrainer:
             batch_size=512,
             shuffle=ShuffleEnum.UNSHUFFLED,
         )
-
-        self.model.eval()
-        all_logits: list[torch.Tensor] = []
-        all_labels: list[torch.Tensor] = []
-
-        with torch.no_grad():
-            for batch_data in val_loader:
-                draft_sequence, patch_id, is_win, *_, picked_hero = batch_data
-                outputs = self.model(draft_sequence, patch_id, picked_hero)
-                all_logits.append(outputs)
-                all_labels.append(is_win)
-
-        logits = torch.cat(all_logits).cpu().numpy().flatten()
-        labels = torch.cat(all_labels).cpu().numpy().flatten()
+        logits_tensor, labels_tensor = predict_logits_and_labels(
+            self.model,
+            val_loader,
+        )
+        logits = logits_tensor.cpu().numpy().flatten()
+        labels = labels_tensor.cpu().numpy().flatten()
 
         def nll(temp: float) -> float:
             scaled = logits / temp

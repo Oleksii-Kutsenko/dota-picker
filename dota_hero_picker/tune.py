@@ -1,5 +1,6 @@
 import gc
 import logging
+import math
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -31,14 +32,35 @@ from .patch_resolver import get_patches_number
 
 logger = logging.getLogger(__name__)
 
-hero_data_manager = HeroDataManager()
-
 
 class CudaOOMTrialPruned(optuna.TrialPruned):
     def __init__(
         self,
     ) -> None:
         super().__init__("CUDA OOM")
+
+
+PARAMETER_ORDER = [
+    # Architecture
+    "d_model",
+    "num_layers",
+    "num_heads",
+    "ffn_ratio",
+    "hidden_dim",
+    "activation",
+    "dropout_rate",
+    "patch_embedding_dim",
+    "stat_projection_activation",
+    # Optimizer
+    "batch_size",
+    "lr",
+    "weight_decay",
+    "decision_weight",
+    # Scheduler
+    "scheduler_patience",
+    "factor",
+    "threshold",
+]
 
 
 def sample_model_parameters(
@@ -48,7 +70,6 @@ def sample_model_parameters(
     d_model = trial.suggest_categorical(
         "d_model",
         [
-            1,
             2,
             4,
             8,
@@ -56,9 +77,12 @@ def sample_model_parameters(
             32,
             64,
             128,
+            256,
+            512,
+            1024,
         ],
     )
-    num_layers = trial.suggest_int("num_layers", 1, 7)
+    num_layers = trial.suggest_int("num_layers", 1, 9)
     num_heads = trial.suggest_categorical(
         "num_heads",
         [
@@ -67,6 +91,8 @@ def sample_model_parameters(
             4,
             8,
             16,
+            32,
+            64,
         ],
     )
     ffn_ratio = trial.suggest_categorical(
@@ -78,6 +104,9 @@ def sample_model_parameters(
             8,
             16,
             32,
+            64,
+            128,
+            256,
         ],
     )
     hidden_dim = trial.suggest_categorical(
@@ -96,6 +125,8 @@ def sample_model_parameters(
             2048,
             4096,
             8192,
+            16384,
+            16384 * 2,
         ],
     )
     activation = trial.suggest_categorical(
@@ -104,8 +135,8 @@ def sample_model_parameters(
     )
     dropout_rate = trial.suggest_float(
         "dropout_rate",
-        0.05,
-        0.65,
+        0.10,
+        0.85,
     )
     patch_embedding_dim = trial.suggest_categorical(
         "patch_embedding_dim",
@@ -118,6 +149,8 @@ def sample_model_parameters(
             32,
             64,
             128,
+            256,
+            512,
         ],
     )
     stat_projection_activation = trial.suggest_categorical(
@@ -154,8 +187,6 @@ def sample_training_arguments(
     batch_size = trial.suggest_categorical(
         "batch_size",
         [
-            8,
-            16,
             32,
             64,
             128,
@@ -166,31 +197,32 @@ def sample_training_arguments(
             4096,
             8192,
             16384,
+            16384 * 2,
         ],
     )
-    lr = trial.suggest_float("lr", 1e-8, 1e-2, log=True)
+    lr = trial.suggest_float("lr", 1e-7, 1e-2, log=True)
     weight_decay = trial.suggest_float(
         "weight_decay",
-        1e-9,
-        1e-1,
+        1e-10,
+        1e-3,
         log=True,
     )
-    decision_weight = trial.suggest_int("decision_weight", 12, 24)
+    decision_weight = trial.suggest_int("decision_weight", 10, 23)
 
     scheduler_patience = trial.suggest_int(
         "scheduler_patience",
-        2,
-        16,
+        1,
+        13,
     )
     factor = trial.suggest_float(
         "factor",
-        0.5,
-        1,
+        0.30,
+        0.85,
     )
     threshold = trial.suggest_float(
         "threshold",
-        1e-8,
-        1e-1,
+        1e-9,
+        1e-4,
         log=True,
     )
 
@@ -215,8 +247,8 @@ def sample_training_arguments(
 
 def create_objective(
     data_manager: DataManager,
-) -> Callable[[Trial], tuple[float, int, float]]:
-    def objective(trial: Trial) -> tuple[float, int, float]:
+) -> Callable[[Trial], tuple[float, float]]:
+    def objective(trial: Trial) -> tuple[float, float]:
         model_params = sample_model_parameters(trial, data_manager)
         training_arguments = sample_training_arguments(trial, data_manager)
 
@@ -225,13 +257,13 @@ def create_objective(
 
         model = MatchWinPredictor(
             model_params,
-            hero_data_manager.get_hero_features_matrix(),
+            data_manager.hero_data_manager.get_hero_features_matrix(),
         )
-        trainable_params = count_trainable_params(model)
+        log_params = float(math.log10(max(1, count_trainable_params(model))))
 
         try:
             trainer = ModelTrainer(model, training_arguments, data_manager)
-            early_stopping = trainer.train()
+            early_stopping = trainer.train(load_best_state=False)
         except torch.OutOfMemoryError as oom_error:
             logger.warning(
                 "CUDA OOM encountered. Pruning trial and clearing cache.",
@@ -239,10 +271,11 @@ def create_objective(
             gc.collect()
             torch.cuda.empty_cache()
             raise CudaOOMTrialPruned from oom_error
+        finally:
+            del model
 
         val_loss = float(early_stopping.best_metrics.loss)
-        val_auc = float(early_stopping.best_metrics.auc)
-        return val_loss, trainable_params, val_auc
+        return val_loss, log_params
 
     return objective
 
@@ -251,6 +284,7 @@ def main(csv_file_path: Path) -> None:
     optuna.logging.set_verbosity(optuna.logging.INFO)
     optuna.logging.enable_propagation()
 
+    hero_data_manager = HeroDataManager()
     data_manager = DataManager(csv_file_path, hero_data_manager)
     objective = create_objective(data_manager)
 
@@ -262,7 +296,7 @@ def main(csv_file_path: Path) -> None:
 
     study = optuna.create_study(
         study_name=study_name,
-        directions=["minimize", "minimize", "maximize"],
+        directions=["minimize", "minimize"],
         sampler=optuna.samplers.TPESampler(
             multivariate=True,
         ),
@@ -272,8 +306,6 @@ def main(csv_file_path: Path) -> None:
 
     study.optimize(
         objective,
-        n_trials=340,
+        n_trials=16 * 25,
         show_progress_bar=True,
     )
-    trials_df = study.trials_dataframe()
-    trials_df.to_csv("optuna_trials.csv", index=False)

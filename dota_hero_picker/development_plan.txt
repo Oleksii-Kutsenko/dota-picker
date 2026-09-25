@@ -5,12 +5,14 @@ After:
 Val AUC: 0.5883 | Test AUC: 0.4783 | Test Loss: 0.6931 | ECE: 0.0088 | Temp: 1.153
 Decision: Rejected
 
+
 is_my_hero_embedding
 Before:
 Val AUC: 0.6135 | Test AUC: 0.5188 | Test Loss: 0.6944 | ECE: 0.0374 | Temp: 0.542
 After:
 Val AUC: 0.5809 | Test AUC: 0.5488 | Test Loss: 0.6963 | ECE: 0.0564 | Temp: 1.600
 Decision: Approved
+
 
 Add a 2-state map side embedding to each slot so self-attention learns hero performance relative to Radiant vs. Dire map geometry and global winrate disparity.
 Before:
@@ -22,9 +24,36 @@ Before:
 2026-09-20 21:29:19,323 - INFO - Test ECE:       0.0334
 2026-09-20 21:29:19,323 - INFO - Temperature:    0.615
 After:
+2026-09-21 22:57:32,165 - INFO - Champion: Trial #133
+2026-09-21 22:57:32,165 - INFO - Validation AUC: 0.5344
+2026-09-21 22:57:32,165 - INFO - Test AUC:       0.5399
+2026-09-21 22:57:32,165 - INFO - Test Loss:      0.6899
+2026-09-21 22:57:32,165 - INFO - Test MCC:       0.0364
+2026-09-21 22:57:32,166 - INFO - Test ECE:       0.0063
+2026-09-21 22:57:32,166 - INFO - Temperature:    1.049
+Decision: Approved
 
 
 Replace empty slot tokens with a draft step embedding on the decision token so the model knows the draft stage without diluting hero attention.
+Before:
+2026-09-24 11:04:20,212 - INFO - Champion: Trial #188
+2026-09-24 11:04:20,212 - INFO - Validation AUC: 0.5640
+2026-09-24 11:04:20,212 - INFO - Test AUC:       0.5360
+2026-09-24 11:04:20,212 - INFO - Test Loss:      0.6932
+2026-09-24 11:04:20,212 - INFO - Test MCC:       -0.0072
+2026-09-24 11:04:20,212 - INFO - Test ECE:       0.0285
+2026-09-24 11:04:20,212 - INFO - Temperature:    8.405
+After:
+2026-09-25 21:35:34,536 - INFO - Champion: Trial #148
+2026-09-25 21:35:34,536 - INFO - Validation AUC: 0.5467
+2026-09-25 21:35:34,536 - INFO - Test AUC:       0.4809
+2026-09-25 21:35:34,536 - INFO - Test Loss:      0.6931
+2026-09-25 21:35:34,536 - INFO - Test MCC:       -0.0492
+2026-09-25 21:35:34,536 - INFO - Test ECE:       0.0386
+2026-09-25 21:35:34,536 - INFO - Temperature:    1.585
+Decision: Tuning rebuilded, approved.
+
+
 
 Concatenate the is_my_hero flag into hero_stats before stat_projection so the player's pick non-linearly modulates the hero's actual attributes.
 Before:
@@ -32,6 +61,7 @@ Val AUC: 0.5656 | Test AUC: 0.4538 | Test Loss: 0.7070 | ECE: 0.0780 | Temp: 0.5
 After:
 Val AUC: 0.5552 | Test AUC: 0.5320 | Test Loss: 0.6934 | ECE: 0.0322 | Temp: 3.750
 Decision: Approved
+
 
 Switch Optuna to multi-objective optimization minimizing both validation loss and parameter count to find compact, Pareto-optimal models that resist overfitting.
 Before:
@@ -47,3 +77,29 @@ Add an auxiliary classification head that predicts randomly masked heroes during
 Inject OpenDota's pairwise hero advantage matrix as an attention bias so the Transformer directly prioritizes known counter-pick relationships.
 
 Replace the binary is_my_hero embedding with an in-slot hero skill profile that injects the player's personal mastery into their pick while using the average player performance baseline for all other lobby heroes.
+
+Add the map side embedding to the decision token as well, so the model knows whether you are Radiant or Dire before any heroes are picked.
+
+Add patch to the hero tokens
+
+Replace linear phase vector addition on hero tokens with a non-linear hero-phase joint projection so the model can learn hero-dependent draft timing sensitivit
+
+Embed is_radiant directly into the decision_token alongside patch and stage.
+
+Concatenate the decision_token, mean(allied_hero_tokens), and mean(enemy_hero_tokens) into the classifier input. The classification head directly receives both full team composition summaries instead of bottlenecking through a single token.
+
+Decouple draft attention into two explicit steps:
+Allied Self-Attention: Allies attend only to allies to encode team synergy and role balance.
+Ally-to-Enemy Cross-Attention: Allied composition queries the enemy composition to compute counter-pick advantages.
+
+Add aggregate team role balance features (carry, support, and initiator totals) to the classifier input so the model explicitly evaluates macro lineup viability and penalizes role-deficient or multi-core drafts.
+
+Inject each hero's patch-level public winrate and pickrate into their static feature vector so the model has an empirical baseline prior of hero power in the current meta.
+
+Enforce game-theoretic zero-sum consistency using an anti-symmetric dual head, logit = f(Allies, Enemies) - f(Enemies, Allies), guaranteeing that P(Win) + P(Loss) = 1.0 and eliminating perspective prediction bias.
+
+Initialize hero identity embeddings via matrix factorization (SVD) of global hero co-occurrence and matchup matrices rather than random Gaussian noise, warm-starting the latent space with known role clusters.
+
+Apply label smoothing (targets 0.10 and 0.90) to the BCE loss to prevent the network from over-saturating logits on noisy match outcomes and unpreventable player throws.
+
+Replace the prepended decision token with a Multi-Head Cross-Attention pooling block over unpadded hero representations, aggregating the full draft state without an information bottleneck.

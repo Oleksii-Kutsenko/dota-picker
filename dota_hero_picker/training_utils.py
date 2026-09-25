@@ -2,7 +2,7 @@ import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Self
+from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 import pandas as pd
@@ -19,6 +19,9 @@ from torchmetrics.classification import (
 
 from dota_hero_picker.data_preparation import SLOT_COLUMNS
 
+if TYPE_CHECKING:
+    from dota_hero_picker.data_manager import DataManager
+
 logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -27,8 +30,8 @@ EARLY_STOPPING_PATIENCE = 6
 
 
 def count_trainable_params(model: nn.Module) -> int:
-    """Count the number of trainable parameters in a PyTorch model."""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    """Count the number of unique trainable parameters in a PyTorch model."""
+    return sum(p.numel() for p in set(model.parameters()) if p.requires_grad)
 
 
 def get_metrics_collection() -> MetricCollection:
@@ -43,11 +46,11 @@ def get_metrics_collection() -> MetricCollection:
 
 
 TrainingExample = tuple[
-    torch.Tensor,  # draft_sequence
-    torch.Tensor,  # patch_id
-    torch.Tensor,  # win
-    torch.Tensor,  # is_my_decision
-    torch.Tensor,  # picked hero
+    torch.Tensor,  # draft_sequence (shape: 9)
+    torch.Tensor,  # match_context [patch_id, draft_stage, is_radiant]
+    torch.Tensor,  # my_hero_slot (scalar)
+    torch.Tensor,  # is_win (scalar)
+    torch.Tensor,  # is_my_decision (scalar)
 ]
 
 
@@ -59,27 +62,34 @@ class DotaDataset(Dataset[TrainingExample]):
         dataframe: pd.DataFrame,
     ) -> None:
         self.draft_sequences = torch.tensor(
-            dataframe[SLOT_COLUMNS].fillna(0).to_numpy(dtype=np.int64),
+            dataframe[SLOT_COLUMNS].to_numpy(dtype=np.int64),
+            dtype=torch.long,
+            device=device,
+        )
+        match_context_matrix = np.column_stack(
+            [
+                dataframe["patch_id"].to_numpy(dtype=np.int64),
+                dataframe["draft_stage"].to_numpy(dtype=np.int64),
+                dataframe["is_radiant"].to_numpy(dtype=np.int64),
+            ],
+        )
+        self.match_contexts = torch.tensor(
+            match_context_matrix,
+            dtype=torch.long,
+            device=device,
+        )
+        self.my_hero_slots = torch.tensor(
+            dataframe["my_hero_slot"].to_numpy(dtype=np.int64),
             dtype=torch.long,
             device=device,
         )
         self.wins = torch.tensor(
-            dataframe["win"].values,
+            dataframe["win"].to_numpy(dtype=np.float32),
             dtype=torch.float,
             device=device,
         )
-        self.patch_ids = torch.tensor(
-            dataframe["patch_id"].values,
-            dtype=torch.long,
-            device=device,
-        )
         self.is_my_decisions = torch.tensor(
-            dataframe["is_my_decision"].values,
-            dtype=torch.long,
-            device=device,
-        )
-        self.picked_heroes = torch.tensor(
-            dataframe["picked_hero"].values,
+            dataframe["is_my_decision"].to_numpy(dtype=np.int64),
             dtype=torch.long,
             device=device,
         )
@@ -91,10 +101,10 @@ class DotaDataset(Dataset[TrainingExample]):
     def __getitem__(self, index: int) -> TrainingExample:
         return (
             self.draft_sequences[index],
-            self.patch_ids[index],
+            self.match_contexts[index],
+            self.my_hero_slots[index],
             self.wins[index],
             self.is_my_decisions[index],
-            self.picked_heroes[index],
         )
 
 
@@ -121,7 +131,6 @@ class DotaBatchLoader:
         return (self.num_samples + self.batch_size - 1) // self.batch_size
 
     def __iter__(self) -> Iterator[TrainingExample]:
-        device = self.dataset.draft_sequences.device
         indices = (
             torch.randperm(self.num_samples, device=device)
             if self.shuffle
@@ -131,10 +140,10 @@ class DotaBatchLoader:
             batch_indices = indices[start_idx : start_idx + self.batch_size]
             yield (
                 self.dataset.draft_sequences[batch_indices],
-                self.dataset.patch_ids[batch_indices],
+                self.dataset.match_contexts[batch_indices],
+                self.dataset.my_hero_slots[batch_indices],
                 self.dataset.wins[batch_indices],
                 self.dataset.is_my_decisions[batch_indices],
-                self.dataset.picked_heroes[batch_indices],
             )
 
 
@@ -172,9 +181,9 @@ def process_evaluation_batch(
     batch_data: TrainingExample,
     criterion: nn.BCEWithLogitsLoss,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    draft_sequence, patch_id, is_win, *_, picked_hero = batch_data
+    draft_sequence, match_context, my_hero_slot, is_win, _ = batch_data
 
-    outputs = model(draft_sequence, patch_id, picked_hero)
+    outputs = model(draft_sequence, match_context, my_hero_slot)
     per_sample_loss = criterion(outputs, is_win)
     loss = per_sample_loss.mean()
 
@@ -280,13 +289,17 @@ def process_training_batch(
     training_components: TrainingComponents,
     decision_weight: int,
 ) -> torch.Tensor:
-    (draft_sequence, patch_id, is_win, is_my_decision, picked_hero) = (
-        batch_data
-    )
+    (
+        draft_sequence,
+        match_context,
+        my_hero_slot,
+        is_win,
+        is_my_decision,
+    ) = batch_data
 
     training_components.optimizer.zero_grad(set_to_none=True)
 
-    outputs = model(draft_sequence, patch_id, picked_hero)
+    outputs = model(draft_sequence, match_context, my_hero_slot)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
 
@@ -308,41 +321,47 @@ def process_training_batch(
     return loss.detach()  # type: ignore[no-any-return]
 
 
+def predict_logits_and_labels(
+    model: nn.Module,
+    loader: DotaBatchLoader,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    model.eval()
+    all_logits: list[torch.Tensor] = []
+    all_labels: list[torch.Tensor] = []
+
+    with torch.no_grad():
+        for batch in loader:
+            draft_sequence, match_context, my_hero_slot, is_win, _ = batch
+            logits = model(
+                draft_sequence,
+                match_context,
+                my_hero_slot,
+            ).float()
+            all_logits.append(logits)
+            all_labels.append(is_win)
+
+    return torch.cat(all_logits), torch.cat(all_labels)
+
+
 def evaluate_model(
     model: nn.Module,
     loader: DotaBatchLoader,
     criterion: nn.BCEWithLogitsLoss,
-    temperature: float,
-) -> tuple[MetricsResult, np.ndarray]:
-    model.eval()
-    total_loss: torch.Tensor | None = None
-    total_samples = 0
+    temperature: float = 1.0,
+) -> MetricsResult:
+    logits, labels = predict_logits_and_labels(model, loader)
+    scaled_logits = logits / temperature
+
+    loss = criterion(scaled_logits, labels).mean().item()
+    probabilities = torch.sigmoid(scaled_logits)
+
     metrics_collection = get_metrics_collection()
-    all_probs_tensors: list[torch.Tensor] = []
+    metrics_collection.update(probabilities, labels)
 
-    with torch.no_grad():
-        for draft_seq, patch_id, is_win, _, picked_hero in loader:
-            scaled = (
-                model(draft_seq, patch_id, picked_hero).float() / temperature
-            )
-            batch_loss = criterion(scaled, is_win).sum()
-            total_loss = (
-                batch_loss if total_loss is None else (total_loss + batch_loss)
-            )
-            total_samples += is_win.numel()
-
-            probs = torch.sigmoid(scaled)
-            all_probs_tensors.append(probs)
-            metrics_collection.update(probs, is_win)
-
-    all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
-    avg_loss = (
-        (total_loss / total_samples).item() if total_loss is not None else 0.0
-    )
     return MetricsResult.from_collection(
-        avg_loss,
+        loss,
         metrics_collection.compute(),
-    ), all_probs
+    )
 
 
 def train_step(
@@ -409,3 +428,27 @@ class TrainingArguments:
     data: TrainingData
     epochs: int = 75
     early_stopping_patience: int = EARLY_STOPPING_PATIENCE
+
+    @classmethod
+    def from_trial_params(
+        cls,
+        params: dict[str, Any],
+        data_manager: "DataManager",
+    ) -> Self:
+        return cls(
+            data=TrainingData(
+                train_dataset=data_manager.train_dataset,
+                val_dataset=data_manager.val_dataset,
+            ),
+            batch_size=int(params["batch_size"]),
+            decision_weight=int(params["decision_weight"]),
+            optimizer_parameters=OptimizerParameters(
+                lr=float(params["lr"]),
+                weight_decay=float(params["weight_decay"]),
+            ),
+            scheduler_parameters=SchedulerParameters(
+                scheduler_patience=int(params["scheduler_patience"]),
+                factor=float(params["factor"]),
+                threshold=float(params["threshold"]),
+            ),
+        )

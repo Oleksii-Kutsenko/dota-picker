@@ -48,6 +48,7 @@ class DataManager:
             dtype={
                 "win": int,
                 "picked_hero": int,
+                "is_radiant": int,
             },
         )
 
@@ -90,16 +91,20 @@ class DataManager:
         )
 
         augmented_train_dataframe = create_augmented_dataframe(train_dataframe)
-
-        logger.info(
-            f"Size of augmented dataset {len(augmented_train_dataframe)}",
+        augmented_validation_dataframe = create_augmented_dataframe(
+            validation_dataframe,
         )
-
-        prepared_validation_dataframe = prepare_dataframe(validation_dataframe)
         prepared_test_dataframe = prepare_dataframe(test_dataframe)
 
+        logger.info(
+            f"Size of augm. dataset {len(augmented_train_dataframe)}",
+        )
+        logger.info(
+            f"Size of augm. val dataset {len(augmented_validation_dataframe)}",
+        )
+
         train_dataset = DotaDataset(augmented_train_dataframe)
-        val_dataset = DotaDataset(prepared_validation_dataframe)
+        val_dataset = DotaDataset(augmented_validation_dataframe)
         test_dataset = DotaDataset(prepared_test_dataframe)
 
         return train_dataset, val_dataset, test_dataset

@@ -8,21 +8,16 @@ import optuna
 import torch
 
 import settings
+from dota_hero_picker.baseline import compute_meta_baseline
 from dota_hero_picker.data_manager import DataManager
 from dota_hero_picker.hero_data_manager import HeroDataManager
 from dota_hero_picker.model_trainer import ModelTrainer
 from dota_hero_picker.neural_network import (
-    ActivationEnum,
-    DataDimensions,
     MatchWinPredictor,
     ModelParameters,
 )
-from dota_hero_picker.patch_resolver import get_patches_number
 from dota_hero_picker.training_utils import (
-    OptimizerParameters,
-    SchedulerParameters,
     TrainingArguments,
-    TrainingData,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,40 +75,13 @@ def parse_trial(
     hero_data_manager: HeroDataManager,
     data_manager: DataManager,
 ) -> tuple[MatchWinPredictor, ModelParameters, TrainingArguments]:
-    params = trial.params
-    model_params = ModelParameters(
-        data_dimensions=DataDimensions(
-            num_heroes=hero_data_manager.get_heroes_number(),
-            num_patches=get_patches_number(),
-        ),
-        d_model=int(params["d_model"]),
-        num_layers=int(params["num_layers"]),
-        num_heads=int(params["num_heads"]),
-        ffn_ratio=int(params["ffn_ratio"]),
-        hidden_dim=int(params["hidden_dim"]),
-        activation=ActivationEnum(params["activation"]),
-        dropout_rate=float(params["dropout_rate"]),
-        patch_embedding_dim=int(params["patch_embedding_dim"]),
-        stat_projection_activation=ActivationEnum(
-            params["stat_projection_activation"],
-        ),
+    model_params = ModelParameters.from_trial_params(
+        trial.params,
+        hero_data_manager,
     )
-    training_args = TrainingArguments(
-        data=TrainingData(
-            train_dataset=data_manager.train_dataset,
-            val_dataset=data_manager.val_dataset,
-        ),
-        batch_size=int(params["batch_size"]),
-        decision_weight=int(params["decision_weight"]),
-        optimizer_parameters=OptimizerParameters(
-            lr=float(params["lr"]),
-            weight_decay=float(params["weight_decay"]),
-        ),
-        scheduler_parameters=SchedulerParameters(
-            scheduler_patience=int(params["scheduler_patience"]),
-            factor=float(params["factor"]),
-            threshold=float(params["threshold"]),
-        ),
+    training_args = TrainingArguments.from_trial_params(
+        trial.params,
+        data_manager,
     )
     model = MatchWinPredictor(
         model_params,
@@ -156,15 +124,15 @@ def select_champion(
     champion: ChampionModel | None = None
 
     for rank, trial in enumerate(trials, start=1):
-        optuna_loss, _, optuna_auc = trial.values
+        optuna_loss, optuna_log_params = trial.values
         candidate = retrain_candidate(trial, hero_data_manager, data_manager)
 
         logger.info(
             f"Candidate {rank}/{len(trials)}: Trial #{candidate.trial_number}",
         )
-        logger.info(f"Optuna Loss: {optuna_loss:.4f}")
-        logger.info(f"Optuna AUC: {optuna_auc:.4f}")
-        logger.info(f"Retrain Val AUC: {candidate.val_auc:.4f}")
+        logger.info(f"Optuna Loss:       {optuna_loss:.4f}")
+        logger.info(f"Optuna Log Params: {optuna_log_params:.4f}")
+        logger.info(f"Retrain Val AUC:   {candidate.val_auc:.4f}")
 
         if candidate.val_auc > best_val_auc:
             best_val_auc = candidate.val_auc
@@ -181,12 +149,17 @@ def train_best_model(csv_file_path: Path) -> None:
     hero_data_manager = HeroDataManager()
     data_manager = DataManager(csv_file_path, hero_data_manager)
 
+    baseline_loss, _ = compute_meta_baseline(data_manager)
+    qualifying_trials = [
+        trial for trial in study.best_trials if trial.values[0] < baseline_loss
+    ]
+    trials_to_retrain = qualifying_trials or study.best_trials
+
     champion = select_champion(
-        study.best_trials,
+        trials_to_retrain,
         hero_data_manager,
         data_manager,
     )
-
     champion.model.load_state_dict(champion.model_state)
     champion_trainer = ModelTrainer(
         champion.model,

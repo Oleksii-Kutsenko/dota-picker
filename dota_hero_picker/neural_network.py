@@ -8,6 +8,9 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
+from dota_hero_picker.hero_data_manager import HeroDataManager
+from dota_hero_picker.patch_resolver import get_patches_number
+
 SEQ_LEN = 9
 
 
@@ -32,7 +35,7 @@ class DataDimensions:
 
 
 @dataclass
-class ModelParameters:
+class ModelParameters:  # pylint: disable=too-many-instance-attributes
     data_dimensions: DataDimensions
     num_layers: int = 2
     num_heads: int = 4
@@ -75,9 +78,37 @@ class ModelParameters:
             activation=ActivationEnum(data["activation"]),
         )
 
+    @classmethod
+    def from_trial_params(
+        cls,
+        params: dict[str, Any],
+        hero_data_manager: HeroDataManager,
+    ) -> Self:
+        return cls(
+            data_dimensions=DataDimensions(
+                num_heroes=hero_data_manager.get_heroes_number(),
+                num_patches=get_patches_number(),
+            ),
+            d_model=int(params["d_model"]),
+            num_layers=int(params["num_layers"]),
+            num_heads=int(params["num_heads"]),
+            ffn_ratio=int(params["ffn_ratio"]),
+            hidden_dim=int(params["hidden_dim"]),
+            activation=ActivationEnum(params["activation"]),
+            dropout_rate=float(params["dropout_rate"]),
+            patch_embedding_dim=int(params["patch_embedding_dim"]),
+            stat_projection_activation=ActivationEnum(
+                params["stat_projection_activation"],
+            ),
+        )
+
 
 class HeroEmbedding(nn.Module):
     hero_static_features: torch.Tensor
+    slot_team_ids: torch.Tensor
+    slot_phase_ids: torch.Tensor
+    slot_team_mask: torch.Tensor
+    slot_indices: torch.Tensor
 
     def __init__(
         self,
@@ -85,9 +116,26 @@ class HeroEmbedding(nn.Module):
         hero_features_matrix: np.ndarray,
     ) -> None:
         super().__init__()
+        self.params = params
         self.register_buffer(
             "hero_static_features",
-            torch.from_numpy(hero_features_matrix).float(),
+            torch.tensor(hero_features_matrix, dtype=torch.float),
+        )
+        self.register_buffer(
+            "slot_team_ids",
+            torch.tensor([0, 0, 1, 1, 0, 0, 1, 1, 0], dtype=torch.long),
+        )
+        self.register_buffer(
+            "slot_phase_ids",
+            torch.tensor([1, 1, 1, 1, 2, 2, 2, 2, 3], dtype=torch.long),
+        )
+        self.register_buffer(
+            "slot_team_mask",
+            torch.tensor([1, 1, 0, 0, 1, 1, 0, 0, 1], dtype=torch.long),
+        )
+        self.register_buffer(
+            "slot_indices",
+            torch.arange(9, dtype=torch.long),
         )
         self.stat_projection = nn.Sequential(
             nn.Linear(params.data_dimensions.num_features + 1, params.d_model),
@@ -101,40 +149,54 @@ class HeroEmbedding(nn.Module):
         )
         self.team_embedding = nn.Embedding(2, params.d_model)
         self.phase_embedding = nn.Embedding(4, params.d_model)
+        self.side_embedding = nn.Embedding(2, params.d_model)
         self.norm = nn.LayerNorm(params.d_model)
         self.dropout = nn.Dropout(params.dropout_rate)
 
     def forward(
         self,
         draft_sequence: torch.Tensor,
-        slot_team_ids: torch.Tensor,
-        slot_phase_ids: torch.Tensor,
-        is_my_hero_ids: torch.Tensor,
+        match_context: torch.Tensor,
+        my_hero_slot: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        is_radiant = match_context[:, 2]
+
+        # 1. Resolve slot side (Radiant vs Dire)
+        radiant_expanded = is_radiant.view(-1, 1)
+        slot_side_ids = torch.where(
+            self.slot_team_mask == 1,
+            1 - radiant_expanded,
+            radiant_expanded,
+        )
+
+        # 2. Personal pick indicator: match against precomputed slot index
+        is_my_hero_slots = torch.eq(
+            self.slot_indices,
+            my_hero_slot.unsqueeze(1),
+        ).long()
+
+        # 3. Project stats + personal pick indicator
         hero_stats = torch.cat(
             [
                 self.hero_static_features[draft_sequence],
-                is_my_hero_ids.unsqueeze(-1).float(),
+                is_my_hero_slots.unsqueeze(-1).float(),
             ],
             dim=-1,
         )
         hero_stat_features = self.stat_projection(hero_stats)
-        hero_identities = self.hero_identity_embedding(draft_sequence)
 
-        team_features = self.team_embedding(slot_team_ids)
-        phase_features = self.phase_embedding(slot_phase_ids)
-
+        # 4. Combine embeddings
         hero_tokens = self.norm(
             hero_stat_features
-            + hero_identities
-            + team_features
-            + phase_features,
+            + self.hero_identity_embedding(draft_sequence)
+            + self.team_embedding(self.slot_team_ids)
+            + self.phase_embedding(self.slot_phase_ids)
+            + self.side_embedding(slot_side_ids),
         )
         hero_tokens = self.dropout(hero_tokens)
 
         is_padding = draft_sequence == 0
         hero_tokens = hero_tokens * (~is_padding).unsqueeze(-1).float()
-
         return hero_tokens, is_padding
 
 
@@ -145,20 +207,11 @@ class MatchWinPredictor(nn.Module):
         hero_features_matrix: np.ndarray,
     ) -> None:
         super().__init__()
-        self.params = params
-        self.register_buffer(
-            "slot_team_ids",
-            torch.tensor([0, 0, 1, 1, 0, 0, 1, 1, 0], dtype=torch.long),
-        )
-        self.register_buffer(
-            "slot_phase_ids",
-            torch.tensor([1, 1, 1, 1, 2, 2, 2, 2, 3], dtype=torch.long),
-        )
-
         self.hero_embedding = HeroEmbedding(params, hero_features_matrix)
         self.decision_token = nn.Parameter(
             torch.randn(1, 1, params.d_model) * 0.02,
         )
+        self.stage_embedding = nn.Embedding(4, params.d_model)
         self.patch_projection = nn.Sequential(
             nn.Embedding(
                 params.data_dimensions.num_patches + 1,
@@ -195,37 +248,32 @@ class MatchWinPredictor(nn.Module):
     def forward(
         self,
         draft_sequence: torch.Tensor,
-        patch_id: torch.Tensor,
-        picked_hero: torch.Tensor,
+        match_context: torch.Tensor,
+        my_hero_slot: torch.Tensor,
     ) -> torch.Tensor:
         batch_size = draft_sequence.size(0)
 
-        is_my_hero_ids = (
-            (draft_sequence == picked_hero.unsqueeze(1))
-            & (picked_hero.unsqueeze(1) != 0)
-        ).long()
-
         hero_tokens, hero_padding = self.hero_embedding(
             draft_sequence,
-            self.slot_team_ids,
-            self.slot_phase_ids,
-            is_my_hero_ids,
+            match_context,
+            my_hero_slot,
         )
 
-        patch_context = self.patch_projection(patch_id).unsqueeze(1)
+        patch_ids = match_context[:, 0]
+        draft_stages = match_context[:, 1]
+
+        patch_context = self.patch_projection(patch_ids).unsqueeze(1)
+        stage_context = self.stage_embedding(draft_stages).unsqueeze(1)
+
         decision_tokens = self.dropout(
             self.norm(
-                self.decision_token.expand(
-                    batch_size,
-                    -1,
-                    -1,
-                )
-                + patch_context,
+                self.decision_token.expand(batch_size, -1, -1)
+                + patch_context
+                + stage_context,
             ),
         )
 
         sequence_tokens = torch.cat([decision_tokens, hero_tokens], dim=1)
-
         padding_mask = F.pad(hero_padding, (1, 0), value=False)
 
         encoded_sequence = self.transformer(
@@ -233,5 +281,4 @@ class MatchWinPredictor(nn.Module):
             src_key_padding_mask=padding_mask,
         )
 
-        decision_state = encoded_sequence[:, 0]
-        return self.classifier(decision_state).squeeze(-1)  # type: ignore[no-any-return]
+        return self.classifier(encoded_sequence[:, 0]).squeeze(-1)  # type: ignore[no-any-return]
