@@ -1,54 +1,42 @@
-import copy
 import logging
-from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 import pandas as pd
 import torch
-from scipy.optimize import minimize_scalar
-from sklearn.metrics import (
-    f1_score,
-)
 from torch import nn, optim
-from torch.amp import GradScaler
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 from torchmetrics import MetricCollection
 from torchmetrics.classification import (
-    BinaryAccuracy,
     BinaryAUROC,
     BinaryCalibrationError,
     BinaryConfusionMatrix,
-    BinaryF1Score,
     BinaryMatthewsCorrCoef,
-    BinaryPrecision,
-    BinaryRecall,
 )
 
 from dota_hero_picker.data_preparation import SLOT_COLUMNS
+
+if TYPE_CHECKING:
+    from dota_hero_picker.data_manager import DataManager
 
 logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-MID_POINT = 0.5
+EARLY_STOPPING_PATIENCE = 6
 
 
 def count_trainable_params(model: nn.Module) -> int:
-    """Count the number of trainable parameters in a PyTorch model."""
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    """Count the number of unique trainable parameters in a PyTorch model."""
+    return sum(p.numel() for p in set(model.parameters()) if p.requires_grad)
 
 
 def get_metrics_collection() -> MetricCollection:
     return MetricCollection(
         {
-            "accuracy": BinaryAccuracy(),
-            "precision": BinaryPrecision(),
-            "recall": BinaryRecall(),
-            "f1": BinaryF1Score(),
             "auc": BinaryAUROC(),
             "mcc": BinaryMatthewsCorrCoef(),
             "ece": BinaryCalibrationError(n_bins=10, norm="l1"),
@@ -58,10 +46,11 @@ def get_metrics_collection() -> MetricCollection:
 
 
 TrainingExample = tuple[
-    torch.Tensor,  # draft_sequence
-    torch.Tensor,  # patch_id
-    torch.Tensor,  # win
-    torch.Tensor,  # is_my_decision
+    torch.Tensor,  # draft_sequence (shape: 9)
+    torch.Tensor,  # match_context [patch_id, draft_stage, is_radiant]
+    torch.Tensor,  # my_hero_slot (scalar)
+    torch.Tensor,  # is_win (scalar)
+    torch.Tensor,  # is_my_decision (scalar)
 ]
 
 
@@ -73,22 +62,34 @@ class DotaDataset(Dataset[TrainingExample]):
         dataframe: pd.DataFrame,
     ) -> None:
         self.draft_sequences = torch.tensor(
-            dataframe[SLOT_COLUMNS].fillna(0).to_numpy(dtype=np.int64),
+            dataframe[SLOT_COLUMNS].to_numpy(dtype=np.int64),
+            dtype=torch.long,
+            device=device,
+        )
+        match_context_matrix = np.column_stack(
+            [
+                dataframe["patch_id"].to_numpy(dtype=np.int64),
+                dataframe["draft_stage"].to_numpy(dtype=np.int64),
+                dataframe["is_radiant"].to_numpy(dtype=np.int64),
+            ],
+        )
+        self.match_contexts = torch.tensor(
+            match_context_matrix,
+            dtype=torch.long,
+            device=device,
+        )
+        self.my_hero_slots = torch.tensor(
+            dataframe["my_hero_slot"].to_numpy(dtype=np.int64),
             dtype=torch.long,
             device=device,
         )
         self.wins = torch.tensor(
-            dataframe["win"].values,
+            dataframe["win"].to_numpy(dtype=np.float32),
             dtype=torch.float,
             device=device,
         )
-        self.patch_ids = torch.tensor(
-            dataframe["patch_id"].values,
-            dtype=torch.long,
-            device=device,
-        )
         self.is_my_decisions = torch.tensor(
-            dataframe["is_my_decision"].values,
+            dataframe["is_my_decision"].to_numpy(dtype=np.int64),
             dtype=torch.long,
             device=device,
         )
@@ -100,7 +101,8 @@ class DotaDataset(Dataset[TrainingExample]):
     def __getitem__(self, index: int) -> TrainingExample:
         return (
             self.draft_sequences[index],
-            self.patch_ids[index],
+            self.match_contexts[index],
+            self.my_hero_slots[index],
             self.wins[index],
             self.is_my_decisions[index],
         )
@@ -113,35 +115,63 @@ class ShuffleEnum(Enum):
     UNSHUFFLED = False
 
 
-def get_data_loader(
-    dataset: Dataset[TrainingExample],
-    batch_size: int,
-    shuffle: ShuffleEnum = ShuffleEnum.SHUFFLED,
-) -> DataLoader[TrainingExample]:
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle.value,
-    )
+class DotaBatchLoader:
+    def __init__(
+        self,
+        dataset: DotaDataset,
+        batch_size: int,
+        shuffle: ShuffleEnum = ShuffleEnum.SHUFFLED,
+    ) -> None:
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle.value
+        self.num_samples = len(dataset)
+
+    def __len__(self) -> int:
+        return (self.num_samples + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self) -> Iterator[TrainingExample]:
+        indices = (
+            torch.randperm(self.num_samples, device=device)
+            if self.shuffle
+            else torch.arange(self.num_samples, device=device)
+        )
+        for start_idx in range(0, self.num_samples, self.batch_size):
+            batch_indices = indices[start_idx : start_idx + self.batch_size]
+            yield (
+                self.dataset.draft_sequences[batch_indices],
+                self.dataset.match_contexts[batch_indices],
+                self.dataset.my_hero_slots[batch_indices],
+                self.dataset.wins[batch_indices],
+                self.dataset.is_my_decisions[batch_indices],
+            )
 
 
 @dataclass
 class MetricsResult:
     loss: float
-    accuracy: float
-    precision: float
-    recall: float
-    f1: float
     auc: float
-    mcc: float
+    mcc: float = 0.0
     ece: float = 0.0
     confusion_matrix: np.ndarray | None = None
 
+    @classmethod
+    def from_collection(
+        cls,
+        loss: float,
+        results: dict[str, torch.Tensor],
+    ) -> Self:
+        return cls(
+            loss=loss,
+            auc=results["auc"].item(),
+            mcc=results["mcc"].item(),
+            ece=results["ece"].item() if "ece" in results else 0.0,
+            confusion_matrix=results["confusion_matrix"].cpu().numpy(),
+        )
+
     def __str__(self) -> str:
         return (
-            f"Loss: {self.loss:.4f}, Acc: {self.accuracy:.4f}, "
-            f"Prec: {self.precision:.4f}, Rec: {self.recall:.4f}, "
-            f"F1: {self.f1:.4f}, AUC: {self.auc:.4f}, "
+            f"Loss: {self.loss:.4f}, AUC: {self.auc:.4f}, "
             f"MCC: {self.mcc:.4f}, ECE: {self.ece:.4f}"
         )
 
@@ -151,9 +181,9 @@ def process_evaluation_batch(
     batch_data: TrainingExample,
     criterion: nn.BCEWithLogitsLoss,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    draft_sequence, patch_id, is_win, *_ = batch_data
+    draft_sequence, match_context, my_hero_slot, is_win, _ = batch_data
 
-    outputs = model(draft_sequence, patch_id)
+    outputs = model(draft_sequence, match_context, my_hero_slot)
     per_sample_loss = criterion(outputs, is_win)
     loss = per_sample_loss.mean()
 
@@ -167,29 +197,53 @@ class EarlyStoppingMode(Enum):
     MAX = "max"
 
 
-class EarlyStopping:
-    """Simple early stopping."""
+class EarlyStoppingStateError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__(
+            "Early stopping has no recorded best state or metrics.",
+        )
 
+
+class EarlyStopping:
     def __init__(
         self,
-        patience: int = 5,
-        delta: float = 0,
-        mode: EarlyStoppingMode = EarlyStoppingMode.MAX,
+        patience: int = 7,
+        delta: float = 1e-4,
+        mode: EarlyStoppingMode = EarlyStoppingMode.MIN,
     ) -> None:
         self.patience = patience
         self.delta = delta
         self.mode = mode
-        self.best_score: float | None = None
-        self.best_metrics: MetricsResult | None = None
         self.early_stop = False
         self.counter = 0
-        self.best_model_state: dict[str, Any] | None = None
+
+        self._best_score: float | None = None
+        self._best_metrics: MetricsResult | None = None
+        self._best_model_state: dict[str, torch.Tensor] | None = None
+
+    @property
+    def best_metrics(self) -> MetricsResult:
+        if self._best_metrics is None:
+            raise EarlyStoppingStateError
+        return self._best_metrics
+
+    @property
+    def best_model_state(self) -> dict[str, torch.Tensor]:
+        if self._best_model_state is None:
+            raise EarlyStoppingStateError
+        return self._best_model_state
+
+    @property
+    def best_score(self) -> float:
+        if self._best_score is None:
+            raise EarlyStoppingStateError
+        return self._best_score
 
     def _is_improvement(self, score: float) -> bool:
-        assert self.best_score is not None
+        assert self._best_score is not None
         if self.mode == EarlyStoppingMode.MAX:
-            return score > self.best_score + self.delta
-        return score < self.best_score - self.delta
+            return score > self._best_score + self.delta
+        return score < self._best_score - self.delta
 
     def __call__(
         self,
@@ -197,10 +251,13 @@ class EarlyStopping:
         metrics: MetricsResult,
         model: nn.Module,
     ) -> None:
-        if self.best_score is None or self._is_improvement(score):
-            self.best_score = score
-            self.best_metrics = metrics
-            self.best_model_state = copy.deepcopy(model.state_dict())
+        if self._best_score is None or self._is_improvement(score):
+            self._best_score = score
+            self._best_metrics = metrics
+            self._best_model_state = {
+                k: v.detach().cpu().clone()
+                for k, v in model.state_dict().items()
+            }
             self.counter = 0
         else:
             self.counter += 1
@@ -208,9 +265,6 @@ class EarlyStopping:
                 self.early_stop = True
 
     def load_best_model(self, model: nn.Module) -> None:
-        if self.best_model_state is None:
-            msg = "Unexpected state"
-            raise RuntimeError(msg)
         model.load_state_dict(self.best_model_state)
 
 
@@ -222,7 +276,6 @@ class TrainingComponents:
     optimizer: optim.Adam
     scheduler: optim.lr_scheduler.ReduceLROnPlateau
     early_stopping: EarlyStopping
-    scaler: GradScaler
     callbacks: list[Callable[[None], None]] | None = None
 
     def __post_init__(self) -> None:
@@ -235,17 +288,18 @@ def process_training_batch(
     batch_data: TrainingExample,
     training_components: TrainingComponents,
     decision_weight: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     (
         draft_sequence,
-        patch_id,
+        match_context,
+        my_hero_slot,
         is_win,
         is_my_decision,
     ) = batch_data
 
     training_components.optimizer.zero_grad(set_to_none=True)
 
-    outputs = model(draft_sequence, patch_id)
+    outputs = model(draft_sequence, match_context, my_hero_slot)
 
     per_sample_loss = training_components.criterion(outputs, is_win)
 
@@ -257,108 +311,85 @@ def process_training_batch(
     loss = (per_sample_loss * decision_weights).sum() / decision_weights.sum()
 
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    torch.nn.utils.clip_grad_norm_(
+        model.parameters(),
+        max_norm=1.0,
+        foreach=True,
+    )
     training_components.optimizer.step()
 
-    return loss.detach(), outputs.detach(), is_win
+    return loss.detach()  # type: ignore[no-any-return]
+
+
+def predict_logits_and_labels(
+    model: nn.Module,
+    loader: DotaBatchLoader,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    model.eval()
+    all_logits: list[torch.Tensor] = []
+    all_labels: list[torch.Tensor] = []
+
+    with torch.no_grad():
+        for batch in loader:
+            draft_sequence, match_context, my_hero_slot, is_win, _ = batch
+            logits = model(
+                draft_sequence,
+                match_context,
+                my_hero_slot,
+            ).float()
+            all_logits.append(logits)
+            all_labels.append(is_win)
+
+    return torch.cat(all_logits), torch.cat(all_labels)
 
 
 def evaluate_model(
     model: nn.Module,
-    loader: DataLoader[TrainingExample],
+    loader: DotaBatchLoader,
     criterion: nn.BCEWithLogitsLoss,
-    temperature: float,
-) -> tuple[MetricsResult, np.ndarray]:
-    model.eval()
+    temperature: float = 1.0,
+) -> MetricsResult:
+    logits, labels = predict_logits_and_labels(model, loader)
+    scaled_logits = logits / temperature
 
-    total_loss = torch.tensor(0.0, device=device)
+    loss = criterion(scaled_logits, labels).mean().item()
+    probabilities = torch.sigmoid(scaled_logits)
 
     metrics_collection = get_metrics_collection()
-    total_samples = 0
-    all_probs_tensors: list[torch.Tensor] = []
+    metrics_collection.update(probabilities, labels)
 
-    with torch.no_grad():
-        for batch_data in loader:
-            (
-                draft_sequence,
-                patch_id,
-                is_win,
-                _,
-            ) = batch_data
-
-            outputs = model(draft_sequence, patch_id)
-
-            scaled_outputs = outputs.float() / temperature
-            per_sample_loss = criterion(scaled_outputs, is_win)
-
-            total_loss += per_sample_loss.sum()
-            total_samples += is_win.numel()
-
-            probs = torch.sigmoid(scaled_outputs)
-            all_probs_tensors.append(probs)
-            metrics_collection.update(probs, is_win)
-
-    avg_loss = (total_loss / total_samples).item()
-    all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
-    results = metrics_collection.compute()
-
-    metrics = MetricsResult(
-        loss=avg_loss,
-        accuracy=results["accuracy"].item(),
-        precision=results["precision"].item(),
-        recall=results["recall"].item(),
-        f1=results["f1"].item(),
-        auc=results["auc"].item(),
-        mcc=results["mcc"].item(),
-        ece=results["ece"].item(),
-        confusion_matrix=results["confusion_matrix"].cpu().numpy(),
+    return MetricsResult.from_collection(
+        loss,
+        metrics_collection.compute(),
     )
-    return metrics, all_probs
 
 
 def train_step(
     model: nn.Module,
-    train_loader: DataLoader[TrainingExample],
+    train_loader: DotaBatchLoader,
     training_components: TrainingComponents,
     decision_weight: int,
-) -> tuple[MetricsResult, np.ndarray]:
+) -> float:
     model.train()
-
-    all_losses: list[torch.Tensor] = []
-    all_probs_tensors: list[torch.Tensor] = []
-    metrics_collection = get_metrics_collection()
+    total_loss: torch.Tensor | None = None
+    num_batches = 0
 
     for batch_data in train_loader:
-        batch_loss, outputs, is_win = process_training_batch(
+        batch_loss = process_training_batch(
             model,
             batch_data,
             training_components,
             decision_weight,
         )
+        total_loss = (
+            batch_loss if total_loss is None else (total_loss + batch_loss)
+        )
+        num_batches += 1
 
-        all_losses.append(batch_loss)
+    if total_loss is None or num_batches == 0:
+        return 0.0
 
-        with torch.no_grad():
-            probs = torch.sigmoid(outputs)
-            all_probs_tensors.append(probs)
-            metrics_collection.update(probs, is_win)
-
-    all_probs = torch.cat(all_probs_tensors).cpu().numpy().flatten()
-
-    results = metrics_collection.compute()
-
-    metrics = MetricsResult(
-        loss=torch.stack(all_losses).mean().item(),
-        accuracy=results["accuracy"].item(),
-        precision=results["precision"].item(),
-        recall=results["recall"].item(),
-        f1=results["f1"].item(),
-        auc=results["auc"].item(),
-        mcc=results["mcc"].item(),
-        confusion_matrix=results["confusion_matrix"].cpu().numpy(),
-    )
-
-    return metrics, all_probs
+    return (total_loss / num_batches).item()
 
 
 @dataclass
@@ -390,86 +421,34 @@ class OptimizerParameters:
 class TrainingArguments:
     """Stores data for training."""
 
-    early_stopping_patience: int
     scheduler_parameters: SchedulerParameters
     optimizer_parameters: OptimizerParameters
     batch_size: int
     decision_weight: int
     data: TrainingData
-    pos_weight: torch.Tensor | None = None
     epochs: int = 75
+    early_stopping_patience: int = EARLY_STOPPING_PATIENCE
 
-
-def compute_baseline_f1(
-    y_train: "pd.Series[float]",
-    y_val: "pd.Series[float]",
-) -> None:
-    # Determine majority class from training data
-    counter = Counter(y_train)
-    majority_class = counter.most_common(1)[0][0]
-
-    # Predict majority class for all validation samples
-    y_pred_baseline = [majority_class] * len(y_val)
-
-    # Compute F1-score for the baseline (using pos_label=1 for win prediction)
-    baseline_f1: float = f1_score(
-        y_val,
-        y_pred_baseline,
-        average="macro",
-    )
-
-    # Also compute class distribution for context
-    train_dist = {k: round(v / len(y_train), 4) for k, v in counter.items()}
-    val_counter = Counter(y_val)
-    val_dist = {k: round(v / len(y_val), 4) for k, v in val_counter.items()}
-
-    logger.info(
-        "Baseline F1-score "
-        f"(always predict majority class {majority_class}): "
-        f"{baseline_f1:.4f}",
-    )
-    logger.info(f"Training class distribution: {train_dist}")
-    logger.info(f"Validation class distribution: {val_dist}")
-
-
-def collect_logits_and_labels(
-    model: nn.Module,
-    loader: DataLoader[TrainingExample],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Collect raw logits and true labels from a data loader."""
-    model.eval()
-    all_logits: list[torch.Tensor] = []
-    all_labels: list[torch.Tensor] = []
-
-    with torch.no_grad():
-        for batch_data in loader:
-            draft_sequence, patch_id, is_win, *_ = batch_data
-
-            outputs = model(draft_sequence, patch_id)
-            all_logits.append(outputs)
-            all_labels.append(is_win)
-
-    logits = torch.cat(all_logits).cpu().numpy().flatten()
-    labels = torch.cat(all_labels).cpu().numpy().flatten()
-    return logits, labels
-
-
-def fit_temperature(
-    logits: np.ndarray,
-    labels: np.ndarray,
-) -> float:
-    """Fit Platt scaling temperature to minimize NLL on validation logits."""
-
-    def nll(temperature: float) -> float:
-        scaled = logits / temperature
-        probs = 1.0 / (1.0 + np.exp(-scaled))
-        probs = np.clip(probs, 1e-7, 1 - 1e-7)
-        return float(
-            -np.mean(
-                labels * np.log(probs) + (1 - labels) * np.log(1 - probs),
+    @classmethod
+    def from_trial_params(
+        cls,
+        params: dict[str, Any],
+        data_manager: "DataManager",
+    ) -> Self:
+        return cls(
+            data=TrainingData(
+                train_dataset=data_manager.train_dataset,
+                val_dataset=data_manager.val_dataset,
+            ),
+            batch_size=int(params["batch_size"]),
+            decision_weight=int(params["decision_weight"]),
+            optimizer_parameters=OptimizerParameters(
+                lr=float(params["lr"]),
+                weight_decay=float(params["weight_decay"]),
+            ),
+            scheduler_parameters=SchedulerParameters(
+                scheduler_patience=int(params["scheduler_patience"]),
+                factor=float(params["factor"]),
+                threshold=float(params["threshold"]),
             ),
         )
-
-    result = minimize_scalar(nll, bounds=(0.1, 10.0), method="bounded")
-    logger.info(f"Fitted temperature: {result.x:.4f}")
-    return float(result.x)

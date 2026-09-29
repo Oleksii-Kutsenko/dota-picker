@@ -1,279 +1,437 @@
+import dataclasses
 from dataclasses import dataclass
-from typing import cast
+from enum import Enum
+from typing import Any, Self
 
 import numpy as np
 import torch
+import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
+from dota_hero_picker.hero_data_manager import HeroDataManager
+from dota_hero_picker.patch_resolver import get_patches_number
+
 SEQ_LEN = 9
+ALLY_SLOT_INDICES = (0, 1, 4, 5, 8)
+ENEMY_SLOT_INDICES = (2, 3, 6, 7)
+
+
+class ActivationEnum(str, Enum):
+    GELU = "gelu"
+    RELU = "relu"
+    SILU = "silu"
+
+
+ACTIVATION_MODULES: dict[ActivationEnum, type[nn.Module]] = {
+    ActivationEnum.GELU: nn.GELU,
+    ActivationEnum.RELU: nn.ReLU,
+    ActivationEnum.SILU: nn.SiLU,
+}
 
 
 @dataclass
-class SiameseParameters:
-    """Parameters for Dual-Stream Siamese Draft Network."""
-
+class DataDimensions:
     num_heroes: int
     num_patches: int
-    d_model: int = 32
+    num_features: int = 45
+
+
+@dataclass
+class SynergyParameters:
+    num_layers: int = 1
+    num_heads: int = 2
+    ffn_ratio: int = 2
+    activation: ActivationEnum = ActivationEnum.SILU
+
+
+@dataclass
+class TransformerParameters:
+    num_layers: int = 2
     num_heads: int = 4
-    num_synergy_layers: int = 1
+    ffn_ratio: int = 2
+    activation: ActivationEnum = ActivationEnum.SILU
+
+
+@dataclass
+class ClassifierParameters:
+    hidden_dim: int = 128
+    activation: ActivationEnum = ActivationEnum.SILU
+
+
+@dataclass
+class ModelParameters:
+    data_dimensions: DataDimensions
+    transformer_parameters: TransformerParameters = dataclasses.field(
+        default_factory=TransformerParameters,
+    )
+    synergy_parameters: SynergyParameters = dataclasses.field(
+        default_factory=SynergyParameters,
+    )
+    classifier_parameters: ClassifierParameters = dataclasses.field(
+        default_factory=ClassifierParameters,
+    )
+    d_model: int = 64
+    patch_embedding_dim: int = 16
     dropout_rate: float = 0.2
-    patch_embedding_dim: int = 8
+    stat_projection_activation: ActivationEnum = ActivationEnum.GELU
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "data_dimensions": dataclasses.asdict(self.data_dimensions),
+            "synergy_parameters": {
+                "num_layers": self.synergy_parameters.num_layers,
+                "num_heads": self.synergy_parameters.num_heads,
+                "ffn_ratio": self.synergy_parameters.ffn_ratio,
+                "activation": self.synergy_parameters.activation.value,
+            },
+            "transformer_parameters": {
+                "num_layers": self.transformer_parameters.num_layers,
+                "num_heads": self.transformer_parameters.num_heads,
+                "ffn_ratio": self.transformer_parameters.ffn_ratio,
+                "activation": self.transformer_parameters.activation.value,
+            },
+            "classifier_parameters": {
+                "hidden_dim": self.classifier_parameters.hidden_dim,
+                "activation": self.classifier_parameters.activation.value,
+            },
+            "d_model": self.d_model,
+            "patch_embedding_dim": self.patch_embedding_dim,
+            "dropout_rate": self.dropout_rate,
+            "stat_projection_activation": self.stat_projection_activation.value,  # noqa: E501
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        return cls(
+            data_dimensions=DataDimensions(**data["data_dimensions"]),
+            synergy_parameters=SynergyParameters(
+                num_layers=data["synergy_parameters"]["num_layers"],
+                num_heads=data["synergy_parameters"]["num_heads"],
+                ffn_ratio=data["synergy_parameters"]["ffn_ratio"],
+                activation=ActivationEnum(
+                    data["synergy_parameters"]["activation"],
+                ),
+            ),
+            transformer_parameters=TransformerParameters(
+                num_layers=data["transformer_parameters"]["num_layers"],
+                num_heads=data["transformer_parameters"]["num_heads"],
+                ffn_ratio=data["transformer_parameters"]["ffn_ratio"],
+                activation=ActivationEnum(
+                    data["transformer_parameters"]["activation"],
+                ),
+            ),
+            classifier_parameters=ClassifierParameters(
+                hidden_dim=data["classifier_parameters"]["hidden_dim"],
+                activation=ActivationEnum(
+                    data["classifier_parameters"]["activation"],
+                ),
+            ),
+            d_model=data["d_model"],
+            patch_embedding_dim=data["patch_embedding_dim"],
+            dropout_rate=data["dropout_rate"],
+            stat_projection_activation=ActivationEnum(
+                data["stat_projection_activation"],
+            ),
+        )
+
+    @classmethod
+    def from_trial_params(
+        cls,
+        params: dict[str, Any],
+        hero_data_manager: HeroDataManager,
+    ) -> Self:
+        return cls(
+            data_dimensions=DataDimensions(
+                num_heroes=hero_data_manager.get_heroes_number(),
+                num_patches=get_patches_number(),
+            ),
+            synergy_parameters=SynergyParameters(
+                num_layers=int(params["synergy_num_layers"]),
+                num_heads=int(params["synergy_num_heads"]),
+                ffn_ratio=int(params["synergy_ffn_ratio"]),
+            ),
+            transformer_parameters=TransformerParameters(
+                num_layers=int(params["num_layers"]),
+                num_heads=int(params["num_heads"]),
+                ffn_ratio=int(params["ffn_ratio"]),
+                activation=ActivationEnum(params["activation"]),
+            ),
+            classifier_parameters=ClassifierParameters(
+                hidden_dim=int(params["hidden_dim"]),
+            ),
+            d_model=int(params["d_model"]),
+            dropout_rate=float(params["dropout_rate"]),
+            patch_embedding_dim=int(params["patch_embedding_dim"]),
+            stat_projection_activation=ActivationEnum(
+                params["stat_projection_activation"],
+            ),
+        )
 
 
-class TeamSynergyBlock(nn.Module):
-    """
-    Self-Attention block to model
-    intra-team combos, CC, and role balance.
-    """
+class HeroEmbedding(nn.Module):
+    hero_static_features: torch.Tensor
+    slot_team_ids: torch.Tensor
+    slot_phase_ids: torch.Tensor
+    slot_team_mask: torch.Tensor
+    slot_indices: torch.Tensor
 
     def __init__(
         self,
-        d_model: int,
-        num_heads: int,
-        num_layers: int,
-        dropout: float,
+        params: ModelParameters,
+        hero_features_matrix: np.ndarray,
     ) -> None:
         super().__init__()
+        self.params = params
+        self.register_buffer(
+            "hero_static_features",
+            torch.tensor(hero_features_matrix, dtype=torch.float),
+        )
+        self.register_buffer(
+            "slot_team_ids",
+            torch.tensor([0, 0, 1, 1, 0, 0, 1, 1, 0], dtype=torch.long),
+        )
+        self.register_buffer(
+            "slot_phase_ids",
+            torch.tensor([1, 1, 1, 1, 2, 2, 2, 2, 3], dtype=torch.long),
+        )
+        self.register_buffer(
+            "slot_team_mask",
+            torch.tensor([1, 1, 0, 0, 1, 1, 0, 0, 1], dtype=torch.long),
+        )
+        self.register_buffer(
+            "slot_indices",
+            torch.arange(9, dtype=torch.long),
+        )
+        self.stat_projection = nn.Sequential(
+            nn.Linear(params.data_dimensions.num_features + 1, params.d_model),
+            ACTIVATION_MODULES[params.stat_projection_activation](),
+            nn.Linear(params.d_model, params.d_model),
+        )
+        self.hero_identity_embedding = nn.Embedding(
+            params.data_dimensions.num_heroes + 1,
+            params.d_model,
+            padding_idx=0,
+        )
+        self.team_embedding = nn.Embedding(2, params.d_model)
+        self.phase_embedding = nn.Embedding(4, params.d_model)
+        self.side_embedding = nn.Embedding(2, params.d_model)
+        self.norm = nn.LayerNorm(params.d_model)
+        self.dropout = nn.Dropout(params.dropout_rate)
+
+    def forward(
+        self,
+        draft_sequence: torch.Tensor,
+        match_context: torch.Tensor,
+        my_hero_slot: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        is_radiant = match_context[:, 2]
+
+        # 1. Resolve slot side (Radiant vs Dire)
+        radiant_expanded = is_radiant.view(-1, 1)
+        slot_side_ids = torch.where(
+            self.slot_team_mask == 1,
+            1 - radiant_expanded,
+            radiant_expanded,
+        )
+
+        # 2. Personal pick indicator: match against precomputed slot index
+        is_my_hero_slots = torch.eq(
+            self.slot_indices,
+            my_hero_slot.unsqueeze(1),
+        ).long()
+
+        # 3. Project stats + personal pick indicator
+        hero_stats = torch.cat(
+            [
+                self.hero_static_features[draft_sequence],
+                is_my_hero_slots.unsqueeze(-1).float(),
+            ],
+            dim=-1,
+        )
+        hero_stat_features = self.stat_projection(hero_stats)
+
+        # 4. Combine embeddings
+        hero_tokens = self.norm(
+            hero_stat_features
+            + self.hero_identity_embedding(draft_sequence)
+            + self.team_embedding(self.slot_team_ids)
+            + self.phase_embedding(self.slot_phase_ids)
+            + self.side_embedding(slot_side_ids),
+        )
+        hero_tokens = self.dropout(hero_tokens)
+
+        is_padding = draft_sequence == 0
+        hero_tokens = hero_tokens * (~is_padding).unsqueeze(-1).float()
+        return hero_tokens, is_padding
+
+
+class DecisionEmbedding(nn.Module):
+    def __init__(self, params: ModelParameters) -> None:
+        super().__init__()
+        self.decision_token = nn.Parameter(
+            torch.randn(1, 1, params.d_model) * 0.02,
+        )
+        self.stage_embedding = nn.Embedding(4, params.d_model)
+        self.patch_projection = nn.Sequential(
+            nn.Embedding(
+                params.data_dimensions.num_patches + 1,
+                params.patch_embedding_dim,
+            ),
+            nn.Linear(params.patch_embedding_dim, params.d_model),
+        )
+        self.norm = nn.LayerNorm(params.d_model)
+        self.dropout = nn.Dropout(params.dropout_rate)
+
+    def forward(
+        self,
+        match_context: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        patch_ids = match_context[:, 0]
+        draft_stages = match_context[:, 1]
+
+        patch_context = self.patch_projection(patch_ids).unsqueeze(1)
+        stage_context = self.stage_embedding(draft_stages).unsqueeze(1)
+
+        return self.dropout(  # type: ignore[no-any-return]
+            self.norm(
+                self.decision_token.expand(batch_size, -1, -1)
+                + patch_context
+                + stage_context,
+            ),
+        )
+
+
+class TeamSynergyEncoder(nn.Module):
+    def __init__(self, params: ModelParameters) -> None:
+        super().__init__()
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=num_heads,
-            dim_feedforward=d_model * 2,
-            dropout=dropout,
-            activation="gelu",
+            d_model=params.d_model,
+            nhead=params.synergy_parameters.num_heads,
+            dim_feedforward=params.d_model
+            * params.synergy_parameters.ffn_ratio,
+            dropout=params.dropout_rate,
+            activation=ACTIVATION_MODULES[
+                params.synergy_parameters.activation
+            ](),
             batch_first=True,
             norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
-            num_layers=num_layers,
+            num_layers=params.synergy_parameters.num_layers,
             enable_nested_tensor=False,
         )
 
     def forward(
         self,
-        x: torch.Tensor,
-        padding_mask: torch.Tensor,
+        hero_tokens: torch.Tensor,
+        hero_padding: torch.Tensor,
     ) -> torch.Tensor:
-        all_masked = padding_mask.all(dim=1, keepdim=True)
-        safe_mask = torch.where(all_masked, False, padding_mask)  # noqa: FBT003
-        out = self.encoder(x, src_key_padding_mask=safe_mask)
-        return torch.where(
-            all_masked.unsqueeze(-1),
-            torch.zeros_like(out),
-            out,
+        allied_hero_tokens = self.encoder(
+            hero_tokens[:, ALLY_SLOT_INDICES],
+            src_key_padding_mask=hero_padding[:, ALLY_SLOT_INDICES],
+        )
+
+        enemy_padding = hero_padding[:, ENEMY_SLOT_INDICES]
+        enemy_has_picks = (~enemy_padding).any(dim=-1)
+
+        safe_enemy_mask = enemy_padding.clone()
+        safe_enemy_mask[~enemy_has_picks, 0] = False
+
+        enemy_hero_tokens = self.encoder(
+            hero_tokens[:, ENEMY_SLOT_INDICES],
+            src_key_padding_mask=safe_enemy_mask,
+        )
+        enemy_hero_tokens = torch.where(
+            enemy_has_picks.view(-1, 1, 1),
+            enemy_hero_tokens,
+            hero_tokens[:, ENEMY_SLOT_INDICES],
+        )
+
+        return torch.stack(
+            [
+                allied_hero_tokens[:, 0],  # slot 0: ally 1
+                allied_hero_tokens[:, 1],  # slot 1: ally 2
+                enemy_hero_tokens[:, 0],  # slot 2: enemy 1 (synergy)
+                enemy_hero_tokens[:, 1],  # slot 3: enemy 2 (synergy)
+                allied_hero_tokens[:, 2],  # slot 4: ally 3
+                allied_hero_tokens[:, 3],  # slot 5: ally 4
+                enemy_hero_tokens[:, 2],  # slot 6: enemy 3 (synergy)
+                enemy_hero_tokens[:, 3],  # slot 7: enemy 4 (synergy)
+                allied_hero_tokens[:, 4],  # slot 8: ally 5
+            ],
+            dim=1,
         )
 
 
-class MatchupCrossAttention(nn.Module):
-    """Cross-Attention block to model counter-picking and lane matchups."""
-
-    def __init__(self, d_model: int, num_heads: int, dropout: float) -> None:
+class MatchWinPredictor(nn.Module):
+    def __init__(
+        self,
+        params: ModelParameters,
+        hero_features_matrix: np.ndarray,
+    ) -> None:
         super().__init__()
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=num_heads,
-            dropout=dropout,
+        self.hero_embedding = HeroEmbedding(params, hero_features_matrix)
+        self.decision_embedding = DecisionEmbedding(params)
+        self.synergy_encoder = TeamSynergyEncoder(params)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=params.d_model,
+            nhead=params.transformer_parameters.num_heads,
+            dim_feedforward=params.d_model
+            * params.transformer_parameters.ffn_ratio,
+            dropout=params.dropout_rate,
+            activation=ACTIVATION_MODULES[
+                params.transformer_parameters.activation
+            ](),
             batch_first=True,
+            norm_first=True,
         )
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=params.transformer_parameters.num_layers,
+            enable_nested_tensor=False,
+        )
+
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(params.d_model),
+            nn.Linear(
+                params.d_model,
+                params.classifier_parameters.hidden_dim,
+            ),
+            ACTIVATION_MODULES[params.classifier_parameters.activation](),
+            nn.Dropout(params.dropout_rate),
+            nn.Linear(params.classifier_parameters.hidden_dim, 1),
+        )
 
     def forward(
         self,
-        query_team: torch.Tensor,
-        key_team: torch.Tensor,
-        key_padding_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        all_masked = key_padding_mask.all(dim=1, keepdim=True)
-        safe_mask = torch.where(
-            all_masked,
-            False,  # noqa: FBT003
-            key_padding_mask,
-        )
-        attn_out, _ = self.cross_attn(
-            query=query_team,
-            key=key_team,
-            value=key_team,
-            key_padding_mask=safe_mask,
-        )
-        attn_out = torch.where(
-            all_masked.unsqueeze(-1),
-            torch.zeros_like(attn_out),
-            attn_out,
-        )
-        return cast(
-            "torch.Tensor",
-            self.norm(query_team + self.dropout(attn_out)),
-        )
-
-
-class SiameseDraftPredictor(nn.Module):  # pylint: disable=too-many-instance-attributes
-    """Dual-Stream Siamese Network for zero-sum Dota 2 draft win prediction."""
-
-    ally_indices: torch.Tensor
-    enemy_indices: torch.Tensor
-    ally_phase_ids: torch.Tensor
-    enemy_phase_ids: torch.Tensor
-
-    def __init__(
-        self,
-        params: SiameseParameters,
-        hero_embeddings: np.ndarray,
-    ) -> None:
-        super().__init__()
-        self.d_model = params.d_model
-
-        # --- 1. Embeddings ---
-        self.hero_emb = nn.Embedding(
-            params.num_heroes + 1,
-            params.d_model,
-            padding_idx=0,
-        )
-        self.phase_emb = nn.Embedding(
-            4,  # Phase 1, Phase 2, Phase 3
-            params.d_model,
-        )
-        self.patch_emb = nn.Embedding(
-            params.num_patches + 1,
-            params.patch_embedding_dim,
-        )
-        self.patch_to_model = nn.Linear(
-            params.patch_embedding_dim,
-            params.d_model,
-        )
-
-        self.input_layer_norm = nn.LayerNorm(params.d_model)
-        self.input_dropout = nn.Dropout(params.dropout_rate)
-
-        # Slot mappings
-        self.register_buffer(
-            "ally_indices",
-            torch.tensor([0, 1, 4, 5, 8], dtype=torch.long),
-        )
-        self.register_buffer(
-            "enemy_indices",
-            torch.tensor([2, 3, 6, 7], dtype=torch.long),
-        )
-        self.register_buffer(
-            "ally_phase_ids",
-            torch.tensor([1, 1, 2, 2, 3], dtype=torch.long),
-        )
-        self.register_buffer(
-            "enemy_phase_ids",
-            torch.tensor([1, 1, 2, 2], dtype=torch.long),
-        )
-
-        # --- 2. Synergy and Matchup Blocks ---
-        self.synergy_block = TeamSynergyBlock(
-            d_model=params.d_model,
-            num_heads=params.num_heads,
-            num_layers=params.num_synergy_layers,
-            dropout=params.dropout_rate,
-        )
-        self.matchup_block = MatchupCrossAttention(
-            d_model=params.d_model,
-            num_heads=params.num_heads,
-            dropout=params.dropout_rate,
-        )
-
-        # --- 3. Siamese Team Power Scorer ---
-        self.team_scorer = nn.Sequential(
-            nn.Linear(params.d_model, params.d_model),
-            nn.GELU(),
-            nn.Dropout(params.dropout_rate),
-            nn.Linear(params.d_model, 1),
-        )
-
-        self._initialize_weights()
-        self.hero_emb.weight.data.copy_(torch.from_numpy(hero_embeddings))
-
-    def _initialize_weights(self) -> None:
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Embedding):
-                nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-    def _embed_team(
-        self,
-        hero_ids: torch.Tensor,
-        phase_ids: torch.Tensor,
-        patch_shift: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size, _ = hero_ids.shape
-        padding_mask = hero_ids == 0
-
-        hero_vecs = self.hero_emb(hero_ids)
-        phase_vecs = (
-            self.phase_emb(phase_ids).unsqueeze(0).expand(batch_size, -1, -1)
-        )
-        valid_mask = (~padding_mask).unsqueeze(-1).float()
-
-        tokens = hero_vecs + phase_vecs + (patch_shift * valid_mask)
-        tokens = self.input_dropout(self.input_layer_norm(tokens))
-        return tokens, padding_mask
-
-    def _pool_team(
-        self,
-        team_reps: torch.Tensor,
-        padding_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Masked mean pooling across valid picked heroes on a team."""
-        valid_mask = (~padding_mask).unsqueeze(-1).float()
-        summed = (team_reps * valid_mask).sum(dim=1)
-        counts = valid_mask.sum(dim=1).clamp(min=1.0)
-        return summed / counts
-
-    def forward(  # pylint: disable=too-many-locals
-        self,
         draft_sequence: torch.Tensor,
-        patch_id: torch.Tensor,
+        match_context: torch.Tensor,
+        my_hero_slot: torch.Tensor,
     ) -> torch.Tensor:
-        patch_shift = self.patch_to_model(self.patch_emb(patch_id)).unsqueeze(
-            1,
+        hero_tokens, hero_padding = self.hero_embedding(
+            draft_sequence,
+            match_context,
+            my_hero_slot,
         )
 
-        # 1. Separate Ally & Enemy streams
-        ally_heroes = draft_sequence[:, self.ally_indices]
-        enemy_heroes = draft_sequence[:, self.enemy_indices]
-
-        # 2. Embed tokens for each team independently
-        ally_tokens, ally_mask = self._embed_team(
-            ally_heroes,
-            self.ally_phase_ids,
-            patch_shift,
-        )
-        enemy_tokens, enemy_mask = self._embed_team(
-            enemy_heroes,
-            self.enemy_phase_ids,
-            patch_shift,
+        updated_hero_tokens = self.synergy_encoder(hero_tokens, hero_padding)
+        decision_tokens = self.decision_embedding(
+            match_context,
+            draft_sequence.size(0),
         )
 
-        # 3. Model Internal Team Synergy (Self-Attention)
-        ally_synergy = self.synergy_block(ally_tokens, ally_mask)
-        enemy_synergy = self.synergy_block(enemy_tokens, enemy_mask)
-
-        # 4. Model Cross-Team Counters (Cross-Attention)
-        ally_context = self.matchup_block(
-            query_team=ally_synergy,
-            key_team=enemy_synergy,
-            key_padding_mask=enemy_mask,
+        sequence_tokens = torch.cat(
+            [decision_tokens, updated_hero_tokens],
+            dim=1,
         )
-        enemy_context = self.matchup_block(
-            query_team=enemy_synergy,
-            key_team=ally_synergy,
-            key_padding_mask=ally_mask,
+        padding_mask = F.pad(hero_padding, (1, 0), value=False)
+
+        encoded_sequence = self.transformer(
+            sequence_tokens,
+            src_key_padding_mask=padding_mask,
         )
 
-        # 5. Pool team representations into single team vectors
-        ally_vec = self._pool_team(ally_context, ally_mask)
-        enemy_vec = self._pool_team(enemy_context, enemy_mask)
-
-        # 6. Evaluate Power Scores & Compute Zero-Sum Margin
-        ally_power = self.team_scorer(ally_vec).squeeze(-1)
-        enemy_power = self.team_scorer(enemy_vec).squeeze(-1)
-
-        return cast("torch.Tensor", ally_power - enemy_power)
+        return self.classifier(encoded_sequence[:, 0]).squeeze(-1)  # type: ignore[no-any-return]
