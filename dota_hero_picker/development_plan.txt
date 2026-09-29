@@ -70,7 +70,48 @@ After:
 Val AUC: 0.6079 | Test AUC: 0.5062 | Test Loss: 0.7054 | ECE: 0.0936 | Temp: 0.999
 Decision: Approved
 
-Split the sequence into allied and enemy pools using self-attention for team synergy and cross-attention for counter-picks.
+Split the sequence into allied and enemy pools using self-attention for team synergy and cross-attention for counter-picks. (Counter picks will be in separate experiment)
+Before:
+2026-09-26 13:29:19,162 - INFO - Champion: Trial #202
+2026-09-26 13:29:19,162 - INFO - Validation AUC: 0.5563
+2026-09-26 13:29:19,162 - INFO - Test AUC:       0.4671
+2026-09-26 13:29:19,162 - INFO - Test Loss:      0.6992
+2026-09-26 13:29:19,162 - INFO - Test MCC:       -0.0463
+2026-09-26 13:29:19,162 - INFO - Test ECE:       0.0533
+2026-09-26 13:29:19,162 - INFO - Temperature:    0.562
+1.Add allies self-attention.
+After:
+2026-09-28 02:01:37,760 - INFO - Champion: Trial #371
+2026-09-28 02:01:37,761 - INFO - Validation AUC: 0.5820
+2026-09-28 02:01:37,761 - INFO - Test AUC:       0.5186
+2026-09-28 02:01:37,761 - INFO - Test Loss:      0.7078
+2026-09-28 02:01:37,761 - INFO - Test MCC:       -0.1005
+2026-09-28 02:01:37,761 - INFO - Test ECE:       0.1100
+2026-09-28 02:01:37,761 - INFO - Temperature:    0.750
+Decision: Approved
+2. Add enemies self-attention.
+Before:
+2026-09-28 12:39:39,562 - INFO - Champion: Trial #345
+2026-09-28 12:39:39,562 - INFO - Validation AUC: 0.5797
+2026-09-28 12:39:39,562 - INFO - Test AUC:       0.5822
+2026-09-28 12:39:39,562 - INFO - Test Loss:      0.6862
+2026-09-28 12:39:39,562 - INFO - Test MCC:       0.0249
+2026-09-28 12:39:39,562 - INFO - Test ECE:       0.0611
+2026-09-28 12:39:39,562 - INFO - Temperature:    0.361
+After:
+2026-09-29 10:54:08,574 - INFO - Champion: Trial #339
+2026-09-29 10:54:08,574 - INFO - Validation AUC: 0.5036
+2026-09-29 10:54:08,574 - INFO - Test AUC:       0.5541
+2026-09-29 10:54:08,574 - INFO - Test Loss:      0.6926
+2026-09-29 10:54:08,574 - INFO - Test MCC:       0.0672
+2026-09-29 10:54:08,574 - INFO - Test ECE:       0.0239
+2026-09-29 10:54:08,574 - INFO - Temperature:    1.429
+Decision: Appoved (logically needed, before results probably just a fluke)
+
+
+Replace zero-padding with phase-, side-, and patch-conditioned unknown hero embeddings so unpicked slots preserve draft timing and map geometry without causing attention dilution.
+
+Add cross-attention between the contextualized allied and enemy pools so the model explicitly evaluates matchup advantages and counter-picks.
 
 Add an auxiliary classification head that predicts randomly masked heroes during training to provide dense draft-coherence supervision beyond noisy win labels.
 

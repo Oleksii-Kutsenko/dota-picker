@@ -130,7 +130,7 @@ def main() -> None:
     top_fraction = 0.10
     target_candidates_count = max(
         1,
-        int(np.ceil(len(completed_trials) * top_fraction)),
+        int(np.ceil(len(qualifying_trials) * top_fraction)),
     )
     top_candidates = get_pareto_fronts(
         qualifying_trials,

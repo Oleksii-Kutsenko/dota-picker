@@ -24,9 +24,12 @@ from dota_hero_picker.training_utils import (
 from .model_trainer import ModelTrainer
 from .neural_network import (
     ActivationEnum,
+    ClassifierParameters,
     DataDimensions,
     MatchWinPredictor,
     ModelParameters,
+    SynergyParameters,
+    TransformerParameters,
 )
 from .patch_resolver import get_patches_number
 
@@ -46,6 +49,9 @@ PARAMETER_ORDER = [
     "num_layers",
     "num_heads",
     "ffn_ratio",
+    "synergy_num_layers",
+    "synergy_num_heads",
+    "synergy_ffn_ratio",
     "hidden_dim",
     "activation",
     "dropout_rate",
@@ -70,8 +76,6 @@ def sample_model_parameters(
     d_model = trial.suggest_categorical(
         "d_model",
         [
-            2,
-            4,
             8,
             16,
             32,
@@ -82,7 +86,7 @@ def sample_model_parameters(
             1024,
         ],
     )
-    num_layers = trial.suggest_int("num_layers", 1, 9)
+    num_layers = trial.suggest_int("num_layers", 1, 8)
     num_heads = trial.suggest_categorical(
         "num_heads",
         [
@@ -92,7 +96,6 @@ def sample_model_parameters(
             8,
             16,
             32,
-            64,
         ],
     )
     ffn_ratio = trial.suggest_categorical(
@@ -105,9 +108,16 @@ def sample_model_parameters(
             16,
             32,
             64,
-            128,
-            256,
         ],
+    )
+    synergy_num_layers = trial.suggest_int("synergy_num_layers", 1, 3)
+    synergy_num_heads = trial.suggest_categorical(
+        "synergy_num_heads",
+        [1, 2, 4, 8],
+    )
+    synergy_ffn_ratio = trial.suggest_categorical(
+        "synergy_ffn_ratio",
+        [1, 2, 4, 8],
     )
     hidden_dim = trial.suggest_categorical(
         "hidden_dim",
@@ -126,17 +136,12 @@ def sample_model_parameters(
             4096,
             8192,
             16384,
-            16384 * 2,
         ],
-    )
-    activation = trial.suggest_categorical(
-        "activation",
-        [activation.value for activation in ActivationEnum],
     )
     dropout_rate = trial.suggest_float(
         "dropout_rate",
-        0.10,
-        0.85,
+        0.05,
+        0.79,
     )
     patch_embedding_dim = trial.suggest_categorical(
         "patch_embedding_dim",
@@ -149,8 +154,6 @@ def sample_model_parameters(
             32,
             64,
             128,
-            256,
-            512,
         ],
     )
     stat_projection_activation = trial.suggest_categorical(
@@ -166,17 +169,25 @@ def sample_model_parameters(
             num_heroes=data_manager.hero_data_manager.get_heroes_number(),
             num_patches=get_patches_number(),
         ),
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        ffn_ratio=ffn_ratio,
         d_model=d_model,
         dropout_rate=dropout_rate,
         patch_embedding_dim=patch_embedding_dim,
         stat_projection_activation=ActivationEnum(
             stat_projection_activation,
         ),
-        activation=ActivationEnum(activation),
+        synergy_parameters=SynergyParameters(
+            num_layers=synergy_num_layers,
+            num_heads=synergy_num_heads,
+            ffn_ratio=synergy_ffn_ratio,
+        ),
+        transformer_parameters=TransformerParameters(
+            num_layers=num_layers,
+            num_heads=num_heads,
+            ffn_ratio=ffn_ratio,
+        ),
+        classifier_parameters=ClassifierParameters(
+            hidden_dim=hidden_dim,
+        ),
     )
 
 
@@ -196,33 +207,35 @@ def sample_training_arguments(
             2048,
             4096,
             8192,
-            16384,
-            16384 * 2,
         ],
     )
     lr = trial.suggest_float("lr", 1e-7, 1e-2, log=True)
     weight_decay = trial.suggest_float(
         "weight_decay",
-        1e-10,
-        1e-3,
+        1e-11,
+        1e-5,
         log=True,
     )
-    decision_weight = trial.suggest_int("decision_weight", 10, 23)
+    decision_weight = trial.suggest_int(
+        "decision_weight",
+        10,
+        24,
+    )
 
     scheduler_patience = trial.suggest_int(
         "scheduler_patience",
-        1,
+        3,
         13,
     )
     factor = trial.suggest_float(
         "factor",
-        0.30,
-        0.85,
+        0.25,
+        0.80,
     )
     threshold = trial.suggest_float(
         "threshold",
-        1e-9,
-        1e-4,
+        1e-10,
+        1e-5,
         log=True,
     )
 
@@ -252,14 +265,23 @@ def create_objective(
         model_params = sample_model_parameters(trial, data_manager)
         training_arguments = sample_training_arguments(trial, data_manager)
 
-        if model_params.d_model % model_params.num_heads != 0:
+        if (
+            model_params.d_model % model_params.synergy_parameters.num_heads
+            != 0
+            or model_params.d_model
+            % model_params.transformer_parameters.num_heads
+            != 0
+        ):
             raise optuna.TrialPruned
 
         model = MatchWinPredictor(
             model_params,
             data_manager.hero_data_manager.get_hero_features_matrix(),
         )
-        log_params = float(math.log10(max(1, count_trainable_params(model))))
+        log_params = round(
+            (math.log10(max(1, count_trainable_params(model)))),
+            2,
+        )
 
         try:
             trainer = ModelTrainer(model, training_arguments, data_manager)
