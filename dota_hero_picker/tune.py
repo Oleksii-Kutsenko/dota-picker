@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import optuna
 import pandas as pd
 import torch
@@ -14,6 +15,7 @@ import settings
 from dota_hero_picker.data_manager import DataManager
 from dota_hero_picker.hero_data_manager import HeroDataManager
 from dota_hero_picker.training_utils import (
+    MetricsResult,
     OptimizerParameters,
     SchedulerParameters,
     TrainingArguments,
@@ -23,9 +25,9 @@ from dota_hero_picker.training_utils import (
 
 from .model_trainer import ModelTrainer
 from .neural_network import (
-    ActivationEnum,
     ClassifierParameters,
     DataDimensions,
+    HeroFeatureParameters,
     MatchWinPredictor,
     ModelParameters,
     SynergyParameters,
@@ -53,10 +55,11 @@ PARAMETER_ORDER = [
     "synergy_num_heads",
     "synergy_ffn_ratio",
     "hidden_dim",
-    "activation",
     "dropout_rate",
-    "patch_embedding_dim",
-    "stat_projection_activation",
+    "hero_embed_dim",
+    "stat_embed_dim",
+    "patch_embed_dim",
+    "num_fusion_layers",
     # Optimizer
     "batch_size",
     "lr",
@@ -67,6 +70,55 @@ PARAMETER_ORDER = [
     "factor",
     "threshold",
 ]
+
+
+class LossMedianPruner:
+    def __init__(
+        self,
+        minimum_startup_trials: int,
+        warmup_epoch_count: int,
+    ) -> None:
+        self.minimum_startup_trials = minimum_startup_trials
+        self.warmup_epoch_count = warmup_epoch_count
+        self.historical_epoch_losses: dict[int, list[float]] = {}
+        self.completed_trial_count = 0
+        self.current_trial_best_loss = float("inf")
+
+    def step(
+        self,
+        epoch: int,
+        validation_metrics: MetricsResult,
+    ) -> None:
+        current_validation_loss = validation_metrics.loss
+        self.current_trial_best_loss = min(
+            self.current_trial_best_loss,
+            current_validation_loss,
+        )
+
+        recorded_losses = self.historical_epoch_losses.setdefault(
+            epoch,
+            [],
+        )
+        recorded_losses.append(self.current_trial_best_loss)
+
+        if (
+            self.completed_trial_count >= self.minimum_startup_trials
+            and epoch >= self.warmup_epoch_count
+            and len(recorded_losses) > 1
+        ):
+            reference_losses = recorded_losses[:-1]
+            median_validation_loss = float(np.median(reference_losses))
+
+            if self.current_trial_best_loss > median_validation_loss:
+                raise optuna.TrialPruned(  # noqa: TRY003
+                    f"Pruned at epoch {epoch + 1}: "
+                    f"Best loss {self.current_trial_best_loss:.4f} > "
+                    f"Median {median_validation_loss:.4f}",
+                )
+
+    def on_trial_complete(self) -> None:
+        self.completed_trial_count += 1
+        self.current_trial_best_loss = float("inf")
 
 
 def sample_model_parameters(
@@ -83,14 +135,12 @@ def sample_model_parameters(
             128,
             256,
             512,
-            1024,
         ],
     )
-    num_layers = trial.suggest_int("num_layers", 1, 8)
+    num_layers = trial.suggest_int("num_layers", 1, 7)
     num_heads = trial.suggest_categorical(
         "num_heads",
         [
-            1,
             2,
             4,
             8,
@@ -107,17 +157,16 @@ def sample_model_parameters(
             8,
             16,
             32,
-            64,
         ],
     )
-    synergy_num_layers = trial.suggest_int("synergy_num_layers", 1, 3)
+    synergy_num_layers = trial.suggest_int("synergy_num_layers", 2, 4)
     synergy_num_heads = trial.suggest_categorical(
         "synergy_num_heads",
-        [1, 2, 4, 8],
+        [2, 4, 8],
     )
     synergy_ffn_ratio = trial.suggest_categorical(
         "synergy_ffn_ratio",
-        [1, 2, 4, 8],
+        [2, 4, 8],
     )
     hidden_dim = trial.suggest_categorical(
         "hidden_dim",
@@ -135,46 +184,50 @@ def sample_model_parameters(
             2048,
             4096,
             8192,
-            16384,
         ],
     )
     dropout_rate = trial.suggest_float(
         "dropout_rate",
         0.05,
-        0.79,
+        0.70,
     )
-    patch_embedding_dim = trial.suggest_categorical(
-        "patch_embedding_dim",
+    hero_embed_dim = trial.suggest_categorical(
+        "hero_embed_dim",
         [
-            1,
-            2,
             4,
             8,
             16,
             32,
-            64,
-            128,
         ],
     )
-    stat_projection_activation = trial.suggest_categorical(
-        "stat_projection_activation",
+    stat_embed_dim = trial.suggest_categorical(
+        "stat_embed_dim",
+        [16, 32, 64],
+    )
+    patch_embed_dim = trial.suggest_categorical(
+        "patch_embed_dim",
         [
-            ActivationEnum.SILU,
-            ActivationEnum.RELU,
+            2,
+            4,
+            8,
+            16,
         ],
     )
+    num_fusion_layers = trial.suggest_int("num_fusion_layers", 2, 4)
 
     return ModelParameters(
         data_dimensions=DataDimensions(
             num_heroes=data_manager.hero_data_manager.get_heroes_number(),
             num_patches=get_patches_number(),
         ),
+        hero_feature_parameters=HeroFeatureParameters(
+            hero_embed_dim=hero_embed_dim,
+            stat_embed_dim=stat_embed_dim,
+            patch_embed_dim=patch_embed_dim,
+            num_fusion_layers=num_fusion_layers,
+        ),
         d_model=d_model,
         dropout_rate=dropout_rate,
-        patch_embedding_dim=patch_embedding_dim,
-        stat_projection_activation=ActivationEnum(
-            stat_projection_activation,
-        ),
         synergy_parameters=SynergyParameters(
             num_layers=synergy_num_layers,
             num_heads=synergy_num_heads,
@@ -206,36 +259,35 @@ def sample_training_arguments(
             1024,
             2048,
             4096,
-            8192,
         ],
     )
     lr = trial.suggest_float("lr", 1e-7, 1e-2, log=True)
     weight_decay = trial.suggest_float(
         "weight_decay",
         1e-11,
-        1e-5,
+        1e-6,
         log=True,
     )
     decision_weight = trial.suggest_int(
         "decision_weight",
         10,
-        24,
+        23,
     )
 
     scheduler_patience = trial.suggest_int(
         "scheduler_patience",
-        3,
+        4,
         13,
     )
     factor = trial.suggest_float(
         "factor",
-        0.25,
+        0.30,
         0.80,
     )
     threshold = trial.suggest_float(
         "threshold",
-        1e-10,
-        1e-5,
+        1e-11,
+        1e-6,
         log=True,
     )
 
@@ -260,6 +312,7 @@ def sample_training_arguments(
 
 def create_objective(
     data_manager: DataManager,
+    pruner: LossMedianPruner,
 ) -> Callable[[Trial], tuple[float, float]]:
     def objective(trial: Trial) -> tuple[float, float]:
         model_params = sample_model_parameters(trial, data_manager)
@@ -285,15 +338,20 @@ def create_objective(
 
         try:
             trainer = ModelTrainer(model, training_arguments, data_manager)
-            early_stopping = trainer.train(load_best_state=False)
+            early_stopping = trainer.train(
+                load_best_state=False,
+                epoch_callback=pruner.step,
+            )
+
         except torch.OutOfMemoryError as oom_error:
             logger.warning(
-                "CUDA OOM encountered. Pruning trial and clearing cache.",
+                "CUDA OOM encountered. Prunsing trial and clearing cache.",
             )
             gc.collect()
             torch.cuda.empty_cache()
             raise CudaOOMTrialPruned from oom_error
         finally:
+            pruner.on_trial_complete()
             del model
 
         val_loss = float(early_stopping.best_metrics.loss)
@@ -308,7 +366,11 @@ def main(csv_file_path: Path) -> None:
 
     hero_data_manager = HeroDataManager()
     data_manager = DataManager(csv_file_path, hero_data_manager)
-    objective = create_objective(data_manager)
+    pruner = LossMedianPruner(
+        minimum_startup_trials=20,
+        warmup_epoch_count=7,
+    )
+    objective = create_objective(data_manager, pruner)
 
     current_date = pd.Timestamp.now().strftime("%Y%m%d")
     study_name = (
@@ -328,6 +390,6 @@ def main(csv_file_path: Path) -> None:
 
     study.optimize(
         objective,
-        n_trials=16 * 25,
+        n_trials=len(PARAMETER_ORDER) * 25,
         show_progress_bar=True,
     )

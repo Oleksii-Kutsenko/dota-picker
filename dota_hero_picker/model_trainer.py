@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -109,6 +110,7 @@ class ModelTrainer:
     def train(
         self,
         load_best_state: bool = True,  # noqa: FBT001, FBT002
+        epoch_callback: Callable[[int, MetricsResult], None] | None = None,
     ) -> EarlyStopping:
         train_loader = DotaBatchLoader(
             self.training_arguments.data.train_dataset,
@@ -122,7 +124,10 @@ class ModelTrainer:
         )
 
         for epoch in range(self.training_arguments.epochs):
-            self.train_epoch(epoch, train_loader, val_loader)
+            _, val_metrics = self.train_epoch(epoch, train_loader, val_loader)
+
+            if epoch_callback is not None:
+                epoch_callback(epoch, val_metrics)
 
             if self.training_components.early_stopping.early_stop:
                 logger.info("Early stopping triggered.")

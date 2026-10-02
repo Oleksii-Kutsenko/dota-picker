@@ -53,6 +53,15 @@ class TransformerParameters:
 
 
 @dataclass
+class HeroFeatureParameters:
+    hero_embed_dim: int = 32
+    stat_embed_dim: int = 32
+    patch_embed_dim: int = 16
+    num_fusion_layers: int = 2
+    activation: ActivationEnum = ActivationEnum.RELU
+
+
+@dataclass
 class ClassifierParameters:
     hidden_dim: int = 128
     activation: ActivationEnum = ActivationEnum.SILU
@@ -61,23 +70,33 @@ class ClassifierParameters:
 @dataclass
 class ModelParameters:
     data_dimensions: DataDimensions
-    transformer_parameters: TransformerParameters = dataclasses.field(
-        default_factory=TransformerParameters,
+    hero_feature_parameters: HeroFeatureParameters = dataclasses.field(
+        default_factory=HeroFeatureParameters,
     )
     synergy_parameters: SynergyParameters = dataclasses.field(
         default_factory=SynergyParameters,
+    )
+    transformer_parameters: TransformerParameters = dataclasses.field(
+        default_factory=TransformerParameters,
     )
     classifier_parameters: ClassifierParameters = dataclasses.field(
         default_factory=ClassifierParameters,
     )
     d_model: int = 64
-    patch_embedding_dim: int = 16
     dropout_rate: float = 0.2
-    stat_projection_activation: ActivationEnum = ActivationEnum.GELU
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "data_dimensions": dataclasses.asdict(self.data_dimensions),
+            "hero_feature_parameters": {
+                "hero_embed_dim": self.hero_feature_parameters.hero_embed_dim,
+                "stat_embed_dim": self.hero_feature_parameters.stat_embed_dim,
+                "patch_embed_dim": self.hero_feature_parameters.patch_embed_dim,  # noqa: E501
+                "num_fusion_layers": (
+                    self.hero_feature_parameters.num_fusion_layers
+                ),
+                "activation": self.hero_feature_parameters.activation.value,
+            },
             "synergy_parameters": {
                 "num_layers": self.synergy_parameters.num_layers,
                 "num_heads": self.synergy_parameters.num_heads,
@@ -95,15 +114,30 @@ class ModelParameters:
                 "activation": self.classifier_parameters.activation.value,
             },
             "d_model": self.d_model,
-            "patch_embedding_dim": self.patch_embedding_dim,
             "dropout_rate": self.dropout_rate,
-            "stat_projection_activation": self.stat_projection_activation.value,  # noqa: E501
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         return cls(
             data_dimensions=DataDimensions(**data["data_dimensions"]),
+            hero_feature_parameters=HeroFeatureParameters(
+                hero_embed_dim=data["hero_feature_parameters"][
+                    "hero_embed_dim"
+                ],
+                stat_embed_dim=data["hero_feature_parameters"][
+                    "stat_embed_dim"
+                ],
+                patch_embed_dim=data["hero_feature_parameters"][
+                    "patch_embed_dim"
+                ],
+                num_fusion_layers=data["hero_feature_parameters"][
+                    "num_fusion_layers"
+                ],
+                activation=ActivationEnum(
+                    data["hero_feature_parameters"]["activation"],
+                ),
+            ),
             synergy_parameters=SynergyParameters(
                 num_layers=data["synergy_parameters"]["num_layers"],
                 num_heads=data["synergy_parameters"]["num_heads"],
@@ -127,11 +161,7 @@ class ModelParameters:
                 ),
             ),
             d_model=data["d_model"],
-            patch_embedding_dim=data["patch_embedding_dim"],
             dropout_rate=data["dropout_rate"],
-            stat_projection_activation=ActivationEnum(
-                data["stat_projection_activation"],
-            ),
         )
 
     @classmethod
@@ -145,6 +175,12 @@ class ModelParameters:
                 num_heroes=hero_data_manager.get_heroes_number(),
                 num_patches=get_patches_number(),
             ),
+            hero_feature_parameters=HeroFeatureParameters(
+                hero_embed_dim=int(params["hero_embed_dim"]),
+                stat_embed_dim=int(params["stat_embed_dim"]),
+                patch_embed_dim=int(params["patch_embed_dim"]),
+                num_fusion_layers=int(params["num_fusion_layers"]),
+            ),
             synergy_parameters=SynergyParameters(
                 num_layers=int(params["synergy_num_layers"]),
                 num_heads=int(params["synergy_num_heads"]),
@@ -154,18 +190,85 @@ class ModelParameters:
                 num_layers=int(params["num_layers"]),
                 num_heads=int(params["num_heads"]),
                 ffn_ratio=int(params["ffn_ratio"]),
-                activation=ActivationEnum(params["activation"]),
             ),
             classifier_parameters=ClassifierParameters(
                 hidden_dim=int(params["hidden_dim"]),
             ),
             d_model=int(params["d_model"]),
             dropout_rate=float(params["dropout_rate"]),
-            patch_embedding_dim=int(params["patch_embedding_dim"]),
-            stat_projection_activation=ActivationEnum(
-                params["stat_projection_activation"],
+        )
+
+
+class HeroTokenEncoder(nn.Module):
+    def __init__(self, params: ModelParameters) -> None:
+        super().__init__()
+        feat_params = params.hero_feature_parameters
+        self.hero_identity = nn.Embedding(
+            params.data_dimensions.num_heroes + 1,
+            feat_params.hero_embed_dim,
+            padding_idx=0,
+        )
+        self.stat_norm = nn.LayerNorm(params.data_dimensions.num_features)
+        self.stat_encoder = nn.Sequential(
+            nn.Linear(
+                params.data_dimensions.num_features + 1,
+                feat_params.stat_embed_dim,
+            ),
+            ACTIVATION_MODULES[feat_params.activation](),
+            nn.Linear(
+                feat_params.stat_embed_dim,
+                feat_params.stat_embed_dim,
             ),
         )
+        self.patch_embedding = nn.Embedding(
+            params.data_dimensions.num_patches + 1,
+            feat_params.patch_embed_dim,
+        )
+
+        in_dim = (
+            feat_params.hero_embed_dim
+            + feat_params.stat_embed_dim
+            + feat_params.patch_embed_dim
+        )
+        fusion_layers: list[nn.Module] = [
+            nn.Linear(in_dim, params.d_model),
+            nn.LayerNorm(params.d_model),
+            ACTIVATION_MODULES[feat_params.activation](),
+            nn.Dropout(params.dropout_rate),
+        ]
+        for _ in range(feat_params.num_fusion_layers - 2):
+            fusion_layers.extend(
+                [
+                    nn.Linear(params.d_model, params.d_model),
+                    nn.LayerNorm(params.d_model),
+                    ACTIVATION_MODULES[feat_params.activation](),
+                    nn.Dropout(params.dropout_rate),
+                ],
+            )
+        fusion_layers.append(nn.Linear(params.d_model, params.d_model))
+        self.fusion = nn.Sequential(*fusion_layers)
+
+    def forward(
+        self,
+        draft_sequence: torch.Tensor,
+        hero_stats: torch.Tensor,
+        patch_ids: torch.Tensor,
+        is_my_hero: torch.Tensor,
+    ) -> torch.Tensor:
+        hero_emb = self.hero_identity(draft_sequence)
+
+        normed_stats = self.stat_norm(hero_stats)
+        stat_inputs = torch.cat([normed_stats, is_my_hero], dim=-1)
+        stat_emb = self.stat_encoder(stat_inputs)
+
+        patch_emb = (
+            self.patch_embedding(patch_ids)
+            .unsqueeze(1)
+            .expand(-1, draft_sequence.size(1), -1)
+        )
+
+        combined = torch.cat([hero_emb, stat_emb, patch_emb], dim=-1)
+        return self.fusion(combined)  # type: ignore[no-any-return]
 
 
 class HeroEmbedding(nn.Module):
@@ -181,7 +284,6 @@ class HeroEmbedding(nn.Module):
         hero_features_matrix: np.ndarray,
     ) -> None:
         super().__init__()
-        self.params = params
         self.register_buffer(
             "hero_static_features",
             torch.tensor(hero_features_matrix, dtype=torch.float),
@@ -202,16 +304,7 @@ class HeroEmbedding(nn.Module):
             "slot_indices",
             torch.arange(9, dtype=torch.long),
         )
-        self.stat_projection = nn.Sequential(
-            nn.Linear(params.data_dimensions.num_features + 1, params.d_model),
-            ACTIVATION_MODULES[params.stat_projection_activation](),
-            nn.Linear(params.d_model, params.d_model),
-        )
-        self.hero_identity_embedding = nn.Embedding(
-            params.data_dimensions.num_heroes + 1,
-            params.d_model,
-            padding_idx=0,
-        )
+        self.token_encoder = HeroTokenEncoder(params)
         self.team_embedding = nn.Embedding(2, params.d_model)
         self.phase_embedding = nn.Embedding(4, params.d_model)
         self.side_embedding = nn.Embedding(2, params.d_model)
@@ -224,9 +317,9 @@ class HeroEmbedding(nn.Module):
         match_context: torch.Tensor,
         my_hero_slot: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        patch_ids = match_context[:, 0]
         is_radiant = match_context[:, 2]
 
-        # 1. Resolve slot side (Radiant vs Dire)
         radiant_expanded = is_radiant.view(-1, 1)
         slot_side_ids = torch.where(
             self.slot_team_mask == 1,
@@ -234,26 +327,25 @@ class HeroEmbedding(nn.Module):
             radiant_expanded,
         )
 
-        # 2. Personal pick indicator: match against precomputed slot index
-        is_my_hero_slots = torch.eq(
-            self.slot_indices,
-            my_hero_slot.unsqueeze(1),
-        ).long()
-
-        # 3. Project stats + personal pick indicator
-        hero_stats = torch.cat(
-            [
-                self.hero_static_features[draft_sequence],
-                is_my_hero_slots.unsqueeze(-1).float(),
-            ],
-            dim=-1,
+        is_my_hero_slots = (
+            torch.eq(
+                self.slot_indices,
+                my_hero_slot.unsqueeze(1),
+            )
+            .unsqueeze(-1)
+            .float()
         )
-        hero_stat_features = self.stat_projection(hero_stats)
 
-        # 4. Combine embeddings
+        hero_stats = self.hero_static_features[draft_sequence]
+        encoded_tokens = self.token_encoder(
+            draft_sequence,
+            hero_stats,
+            patch_ids,
+            is_my_hero_slots,
+        )
+
         hero_tokens = self.norm(
-            hero_stat_features
-            + self.hero_identity_embedding(draft_sequence)
+            encoded_tokens
             + self.team_embedding(self.slot_team_ids)
             + self.phase_embedding(self.slot_phase_ids)
             + self.side_embedding(slot_side_ids),
@@ -275,9 +367,12 @@ class DecisionEmbedding(nn.Module):
         self.patch_projection = nn.Sequential(
             nn.Embedding(
                 params.data_dimensions.num_patches + 1,
-                params.patch_embedding_dim,
+                params.hero_feature_parameters.patch_embed_dim,
             ),
-            nn.Linear(params.patch_embedding_dim, params.d_model),
+            nn.Linear(
+                params.hero_feature_parameters.patch_embed_dim,
+                params.d_model,
+            ),
         )
         self.norm = nn.LayerNorm(params.d_model)
         self.dropout = nn.Dropout(params.dropout_rate)
