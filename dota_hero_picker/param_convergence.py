@@ -10,7 +10,6 @@ from dota_hero_picker.baseline import compute_meta_baseline
 from dota_hero_picker.data_manager import DataManager
 from dota_hero_picker.hero_data_manager import HeroDataManager
 from dota_hero_picker.train import load_latest_study
-from dota_hero_picker.tune import PARAMETER_ORDER
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +71,7 @@ def log_parameter_convergence(
     )
     logger.info("=" * 80)
 
-    for param_name in PARAMETER_ORDER:
-        distribution = parameter_distributions[param_name]
+    for param_name, distribution in parameter_distributions.items():
         param_values = top_candidates[f"params_{param_name}"]
 
         if isinstance(

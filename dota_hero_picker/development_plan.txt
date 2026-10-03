@@ -54,7 +54,6 @@ After:
 Decision: Tuning rebuilded, approved.
 
 
-
 Concatenate the is_my_hero flag into hero_stats before stat_projection so the player's pick non-linearly modulates the hero's actual attributes.
 Before:
 Val AUC: 0.5656 | Test AUC: 0.4538 | Test Loss: 0.7070 | ECE: 0.0780 | Temp: 0.543
@@ -69,6 +68,7 @@ Val AUC: 0.5655 | Test AUC: 0.4678 | Test Loss: 0.7048 | ECE: 0.0977 | Temp: 0.4
 After:
 Val AUC: 0.6079 | Test AUC: 0.5062 | Test Loss: 0.7054 | ECE: 0.0936 | Temp: 0.999
 Decision: Approved
+
 
 Split the sequence into allied and enemy pools using self-attention for team synergy and cross-attention for counter-picks. (Counter picks will be in separate experiment)
 Before:
@@ -110,6 +110,43 @@ Decision: Appoved (logically needed, before results probably just a fluke)
 
 
 Replace zero-padding with phase-, side-, and patch-conditioned unknown hero embeddings so unpicked slots preserve draft timing and map geometry without causing attention dilution.
+Before:
+2026-10-01 02:30:10,994 - INFO - Champion: Trial #333
+2026-10-01 02:30:10,994 - INFO - Validation AUC: 0.5634
+2026-10-01 02:30:10,994 - INFO - Test AUC:       0.5378
+2026-10-01 02:30:10,994 - INFO - Test Loss:      0.6905
+2026-10-01 02:30:10,994 - INFO - Test MCC:       0.0561
+2026-10-01 02:30:10,994 - INFO - Test ECE:       0.0102
+2026-10-01 02:30:10,994 - INFO - Temperature:    1.242
+After:
+2026-10-01 16:54:16,871 - INFO - Champion: Trial #367
+2026-10-01 16:54:16,871 - INFO - Validation AUC: 0.5559
+2026-10-01 16:54:16,871 - INFO - Test AUC:       0.4668
+2026-10-01 16:54:16,871 - INFO - Test Loss:      0.7015
+2026-10-01 16:54:16,871 - INFO - Test MCC:       -0.0453
+2026-10-01 16:54:16,871 - INFO - Test ECE:       0.0583
+2026-10-01 16:54:16,871 - INFO - Temperature:    0.818
+Decision: Rejected
+
+Transformer readout attention
+Before:
+2026-10-02 11:14:09,891 - INFO - Champion: Trial #190
+2026-10-02 11:14:09,891 - INFO - Validation AUC: 0.5355
+2026-10-02 11:14:09,891 - INFO - Test AUC:       0.5311
+2026-10-02 11:14:09,891 - INFO - Test Loss:      0.6911
+2026-10-02 11:14:09,891 - INFO - Test MCC:       0.0590
+2026-10-02 11:14:09,891 - INFO - Test ECE:       0.0122
+2026-10-02 11:14:09,891 - INFO - Temperature:    0.778
+After:
+2026-10-03 12:18:25,209 - INFO - Champion: Trial #590
+2026-10-03 12:18:25,209 - INFO - Validation AUC: 0.5084
+2026-10-03 12:18:25,209 - INFO - Test AUC:       0.5168
+2026-10-03 12:18:25,209 - INFO - Test Loss:      0.6928
+2026-10-03 12:18:25,209 - INFO - Test MCC:       0.0512
+2026-10-03 12:18:25,209 - INFO - Test ECE:       0.0224
+2026-10-03 12:18:25,209 - INFO - Temperature:    2.560
+
+Replace linear phase vector addition on hero tokens with a non-linear hero-phase joint projection
 
 Add cross-attention between the contextualized allied and enemy pools so the model explicitly evaluates matchup advantages and counter-picks.
 
@@ -122,6 +159,23 @@ Replace the binary is_my_hero embedding with an in-slot hero skill profile that 
 Add the map side embedding to the decision token as well, so the model knows whether you are Radiant or Dire before any heroes are picked.
 
 Add patch to the hero tokens
+Before:
+2026-09-29 22:24:13,442 - INFO - Champion: Trial #238
+2026-09-29 22:24:13,442 - INFO - Validation AUC: 0.5016
+2026-09-29 22:24:13,442 - INFO - Test AUC:       0.4636
+2026-09-29 22:24:13,442 - INFO - Test Loss:      0.6931
+2026-09-29 22:24:13,442 - INFO - Test MCC:       0.0051
+2026-09-29 22:24:13,442 - INFO - Test ECE:       0.0177
+2026-09-29 22:24:13,442 - INFO - Temperature:    10.000
+After:
+2026-09-30 15:24:10,313 - INFO - Champion: Trial #319
+2026-09-30 15:24:10,313 - INFO - Validation AUC: 0.5166
+2026-09-30 15:24:10,313 - INFO - Test AUC:       0.5203
+2026-09-30 15:24:10,313 - INFO - Test Loss:      0.6927
+2026-09-30 15:24:10,313 - INFO - Test MCC:       -0.0747
+2026-09-30 15:24:10,313 - INFO - Test ECE:       0.0203
+2026-09-30 15:24:10,313 - INFO - Temperature:    1.692
+Decision: Approved
 
 Replace linear phase vector addition on hero tokens with a non-linear hero-phase joint projection so the model can learn hero-dependent draft timing sensitivit
 
