@@ -28,6 +28,7 @@ from .neural_network import (
     ClassifierParameters,
     DataDimensions,
     HeroFeatureParameters,
+    MatchContextParameters,
     MatchWinPredictor,
     ModelParameters,
     SynergyParameters,
@@ -43,33 +44,6 @@ class CudaOOMTrialPruned(optuna.TrialPruned):
         self,
     ) -> None:
         super().__init__("CUDA OOM")
-
-
-PARAMETER_ORDER = [
-    # Architecture
-    "d_model",
-    "num_layers",
-    "num_heads",
-    "ffn_ratio",
-    "synergy_num_layers",
-    "synergy_num_heads",
-    "synergy_ffn_ratio",
-    "hidden_dim",
-    "dropout_rate",
-    "hero_embed_dim",
-    "stat_embed_dim",
-    "patch_embed_dim",
-    "num_fusion_layers",
-    # Optimizer
-    "batch_size",
-    "lr",
-    "weight_decay",
-    "decision_weight",
-    # Scheduler
-    "scheduler_patience",
-    "factor",
-    "threshold",
-]
 
 
 class LossMedianPruner:
@@ -214,6 +188,15 @@ def sample_model_parameters(
         ],
     )
     num_fusion_layers = trial.suggest_int("num_fusion_layers", 2, 4)
+    stage_embed_dim = trial.suggest_categorical(
+        "stage_embed_dim",
+        [2, 4, 8, 16],
+    )
+    side_embed_dim = trial.suggest_categorical(
+        "side_embed_dim",
+        [2, 4, 8, 16],
+    )
+    classifier_num_layers = trial.suggest_int("classifier_num_layers", 1, 3)
 
     return ModelParameters(
         data_dimensions=DataDimensions(
@@ -238,8 +221,13 @@ def sample_model_parameters(
             num_heads=num_heads,
             ffn_ratio=ffn_ratio,
         ),
+        match_context_parameters=MatchContextParameters(
+            stage_embed_dim=stage_embed_dim,
+            side_embed_dim=side_embed_dim,
+        ),
         classifier_parameters=ClassifierParameters(
             hidden_dim=hidden_dim,
+            num_layers=classifier_num_layers,
         ),
     )
 
@@ -360,6 +348,13 @@ def create_objective(
     return objective
 
 
+def get_hyperparameter_count(data_manager: DataManager) -> int:
+    trial = optuna.create_study().ask()
+    sample_model_parameters(trial, data_manager)
+    sample_training_arguments(trial, data_manager)
+    return len(trial.params)
+
+
 def main(csv_file_path: Path) -> None:
     optuna.logging.set_verbosity(optuna.logging.INFO)
     optuna.logging.enable_propagation()
@@ -367,7 +362,7 @@ def main(csv_file_path: Path) -> None:
     hero_data_manager = HeroDataManager()
     data_manager = DataManager(csv_file_path, hero_data_manager)
     pruner = LossMedianPruner(
-        minimum_startup_trials=20,
+        minimum_startup_trials=30,
         warmup_epoch_count=7,
     )
     objective = create_objective(data_manager, pruner)
@@ -388,8 +383,9 @@ def main(csv_file_path: Path) -> None:
         load_if_exists=True,
     )
 
+    num_params = get_hyperparameter_count(data_manager)
     study.optimize(
         objective,
-        n_trials=len(PARAMETER_ORDER) * 25,
+        n_trials=num_params * 25,
         show_progress_bar=True,
     )
