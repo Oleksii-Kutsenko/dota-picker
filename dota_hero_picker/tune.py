@@ -28,7 +28,6 @@ from .neural_network import (
     ClassifierParameters,
     DataDimensions,
     HeroFeatureParameters,
-    MatchContextParameters,
     MatchWinPredictor,
     ModelParameters,
     SynergyParameters,
@@ -108,18 +107,17 @@ def sample_model_parameters(
             64,
             128,
             256,
-            512,
         ],
     )
-    num_layers = trial.suggest_int("num_layers", 1, 7)
+    num_layers = trial.suggest_int("num_layers", 1, 6)
     num_heads = trial.suggest_categorical(
         "num_heads",
         [
+            1,
             2,
             4,
             8,
             16,
-            32,
         ],
     )
     ffn_ratio = trial.suggest_categorical(
@@ -130,17 +128,24 @@ def sample_model_parameters(
             4,
             8,
             16,
-            32,
         ],
     )
-    synergy_num_layers = trial.suggest_int("synergy_num_layers", 2, 4)
+    synergy_num_layers = trial.suggest_int("synergy_num_layers", 1, 3)
     synergy_num_heads = trial.suggest_categorical(
         "synergy_num_heads",
-        [2, 4, 8],
+        [
+            1,
+            2,
+            4,
+        ],
     )
     synergy_ffn_ratio = trial.suggest_categorical(
         "synergy_ffn_ratio",
-        [2, 4, 8],
+        [
+            1,
+            2,
+            4,
+        ],
     )
     hidden_dim = trial.suggest_categorical(
         "hidden_dim",
@@ -157,26 +162,25 @@ def sample_model_parameters(
             1024,
             2048,
             4096,
-            8192,
         ],
     )
     dropout_rate = trial.suggest_float(
         "dropout_rate",
-        0.05,
-        0.70,
+        0.00,
+        0.65,
     )
     hero_embed_dim = trial.suggest_categorical(
         "hero_embed_dim",
         [
-            4,
             8,
             16,
             32,
+            64,
         ],
     )
     stat_embed_dim = trial.suggest_categorical(
         "stat_embed_dim",
-        [16, 32, 64],
+        [8, 16, 32, 64],
     )
     patch_embed_dim = trial.suggest_categorical(
         "patch_embed_dim",
@@ -184,19 +188,9 @@ def sample_model_parameters(
             2,
             4,
             8,
-            16,
         ],
     )
-    num_fusion_layers = trial.suggest_int("num_fusion_layers", 2, 4)
-    stage_embed_dim = trial.suggest_categorical(
-        "stage_embed_dim",
-        [2, 4, 8, 16],
-    )
-    side_embed_dim = trial.suggest_categorical(
-        "side_embed_dim",
-        [2, 4, 8, 16],
-    )
-    classifier_num_layers = trial.suggest_int("classifier_num_layers", 1, 3)
+    num_fusion_layers = trial.suggest_int("num_fusion_layers", 1, 3)
 
     return ModelParameters(
         data_dimensions=DataDimensions(
@@ -221,13 +215,8 @@ def sample_model_parameters(
             num_heads=num_heads,
             ffn_ratio=ffn_ratio,
         ),
-        match_context_parameters=MatchContextParameters(
-            stage_embed_dim=stage_embed_dim,
-            side_embed_dim=side_embed_dim,
-        ),
         classifier_parameters=ClassifierParameters(
             hidden_dim=hidden_dim,
-            num_layers=classifier_num_layers,
         ),
     )
 
@@ -246,36 +235,35 @@ def sample_training_arguments(
             512,
             1024,
             2048,
-            4096,
         ],
     )
-    lr = trial.suggest_float("lr", 1e-7, 1e-2, log=True)
+    lr = trial.suggest_float("lr", 1e-6, 1e-2, log=True)
     weight_decay = trial.suggest_float(
         "weight_decay",
-        1e-11,
-        1e-6,
+        1e-12,
+        1e-7,
         log=True,
     )
     decision_weight = trial.suggest_int(
         "decision_weight",
-        10,
-        23,
+        9,
+        22,
     )
 
     scheduler_patience = trial.suggest_int(
         "scheduler_patience",
-        4,
-        13,
+        5,
+        12,
     )
     factor = trial.suggest_float(
         "factor",
         0.30,
-        0.80,
+        0.75,
     )
     threshold = trial.suggest_float(
         "threshold",
-        1e-11,
-        1e-6,
+        1e-12,
+        1e-7,
         log=True,
     )
 
