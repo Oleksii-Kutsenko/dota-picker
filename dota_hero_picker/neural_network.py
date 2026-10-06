@@ -355,16 +355,6 @@ class DecisionEmbedding(nn.Module):
             torch.randn(1, 1, params.d_model) * 0.02,
         )
         self.stage_embedding = nn.Embedding(4, params.d_model)
-        self.patch_projection = nn.Sequential(
-            nn.Embedding(
-                params.data_dimensions.num_patches + 1,
-                params.hero_feature_parameters.patch_embed_dim,
-            ),
-            nn.Linear(
-                params.hero_feature_parameters.patch_embed_dim,
-                params.d_model,
-            ),
-        )
         self.norm = nn.LayerNorm(params.d_model)
         self.dropout = nn.Dropout(params.dropout_rate)
 
@@ -373,17 +363,13 @@ class DecisionEmbedding(nn.Module):
         match_context: torch.Tensor,
         batch_size: int,
     ) -> torch.Tensor:
-        patch_ids = match_context[:, 0]
         draft_stages = match_context[:, 1]
 
-        patch_context = self.patch_projection(patch_ids).unsqueeze(1)
         stage_context = self.stage_embedding(draft_stages).unsqueeze(1)
 
         return self.dropout(  # type: ignore[no-any-return]
             self.norm(
-                self.decision_token.expand(batch_size, -1, -1)
-                + patch_context
-                + stage_context,
+                self.decision_token.expand(batch_size, -1, -1) + stage_context,
             ),
         )
 
@@ -480,10 +466,18 @@ class MatchWinPredictor(nn.Module):
             enable_nested_tensor=False,
         )
 
+        self.patch_embedding = nn.Embedding(
+            params.data_dimensions.num_patches + 1,
+            params.hero_feature_parameters.patch_embed_dim,
+        )
+
+        classifier_input_dimension = (
+            params.d_model + params.hero_feature_parameters.patch_embed_dim
+        )
         self.classifier = nn.Sequential(
-            nn.LayerNorm(params.d_model),
+            nn.LayerNorm(classifier_input_dimension),
             nn.Linear(
-                params.d_model,
+                classifier_input_dimension,
                 params.classifier_parameters.hidden_dim,
             ),
             ACTIVATION_MODULES[params.classifier_parameters.activation](),
@@ -524,4 +518,14 @@ class MatchWinPredictor(nn.Module):
             src_key_padding_mask=padding_mask,
         )
 
-        return self.classifier(encoded_sequence[:, 0]).squeeze(-1)  # type: ignore[no-any-return]
+        decision_token_representation = encoded_sequence[:, 0]
+        patch_ids = match_context[:, 0]
+        patch_context = self.patch_embedding(patch_ids)
+
+        classifier_input = torch.cat(
+            [decision_token_representation, patch_context],
+            dim=-1,
+        )
+
+        return self.classifier(classifier_input).squeeze(-1)  # type: ignore[no-any-return]
+

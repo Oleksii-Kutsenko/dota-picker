@@ -101,15 +101,15 @@ def sample_model_parameters(
     d_model = trial.suggest_categorical(
         "d_model",
         [
+            4,
             8,
             16,
             32,
             64,
             128,
-            256,
         ],
     )
-    num_layers = trial.suggest_int("num_layers", 1, 6)
+    num_layers = trial.suggest_int("num_layers", 1, 5)
     num_heads = trial.suggest_categorical(
         "num_heads",
         [
@@ -127,16 +127,16 @@ def sample_model_parameters(
             2,
             4,
             8,
-            16,
         ],
     )
-    synergy_num_layers = trial.suggest_int("synergy_num_layers", 1, 3)
+    synergy_num_layers = trial.suggest_int("synergy_num_layers", 1, 4)
     synergy_num_heads = trial.suggest_categorical(
         "synergy_num_heads",
         [
             1,
             2,
             4,
+            8,
         ],
     )
     synergy_ffn_ratio = trial.suggest_categorical(
@@ -145,6 +145,7 @@ def sample_model_parameters(
             1,
             2,
             4,
+            8,
         ],
     )
     hidden_dim = trial.suggest_categorical(
@@ -161,36 +162,43 @@ def sample_model_parameters(
             512,
             1024,
             2048,
-            4096,
         ],
     )
     dropout_rate = trial.suggest_float(
         "dropout_rate",
         0.00,
-        0.65,
+        0.60,
     )
     hero_embed_dim = trial.suggest_categorical(
         "hero_embed_dim",
         [
+            4,
             8,
             16,
             32,
             64,
+            128,
         ],
     )
     stat_embed_dim = trial.suggest_categorical(
         "stat_embed_dim",
-        [8, 16, 32, 64],
+        [
+            4,
+            8,
+            16,
+            32,
+        ],
     )
     patch_embed_dim = trial.suggest_categorical(
         "patch_embed_dim",
         [
+            1,
             2,
             4,
             8,
         ],
     )
-    num_fusion_layers = trial.suggest_int("num_fusion_layers", 1, 3)
+    num_fusion_layers = trial.suggest_int("num_fusion_layers", 1, 4)
 
     return ModelParameters(
         data_dimensions=DataDimensions(
@@ -234,10 +242,9 @@ def sample_training_arguments(
             256,
             512,
             1024,
-            2048,
         ],
     )
-    lr = trial.suggest_float("lr", 1e-6, 1e-2, log=True)
+    lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
     weight_decay = trial.suggest_float(
         "weight_decay",
         1e-12,
@@ -246,8 +253,8 @@ def sample_training_arguments(
     )
     decision_weight = trial.suggest_int(
         "decision_weight",
-        9,
-        22,
+        10,
+        23,
     )
 
     scheduler_patience = trial.suggest_int(
@@ -257,8 +264,8 @@ def sample_training_arguments(
     )
     factor = trial.suggest_float(
         "factor",
-        0.30,
-        0.75,
+        0.25,
+        0.70,
     )
     threshold = trial.suggest_float(
         "threshold",
@@ -266,6 +273,7 @@ def sample_training_arguments(
         1e-7,
         log=True,
     )
+    label_smoothing = trial.suggest_float("label_smoothing", 0.0, 0.2)
 
     return TrainingArguments(
         data=TrainingData(
@@ -283,6 +291,7 @@ def sample_training_arguments(
         ),
         batch_size=batch_size,
         decision_weight=decision_weight,
+        label_smoothing=label_smoothing,
     )
 
 
@@ -351,7 +360,7 @@ def main(csv_file_path: Path) -> None:
     data_manager = DataManager(csv_file_path, hero_data_manager)
     pruner = LossMedianPruner(
         minimum_startup_trials=30,
-        warmup_epoch_count=7,
+        warmup_epoch_count=8,
     )
     objective = create_objective(data_manager, pruner)
 
