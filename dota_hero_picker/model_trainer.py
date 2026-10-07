@@ -80,6 +80,7 @@ class ModelTrainer:
             train_loader,
             self.training_components,
             self.training_arguments.decision_weight,
+            self.training_arguments.label_smoothing,
         )
 
         val_metrics = evaluate_model(

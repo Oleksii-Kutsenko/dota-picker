@@ -288,6 +288,7 @@ def process_training_batch(
     batch_data: TrainingExample,
     training_components: TrainingComponents,
     decision_weight: int,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
     (
         draft_sequence,
@@ -301,8 +302,14 @@ def process_training_batch(
 
     outputs = model(draft_sequence, match_context, my_hero_slot)
 
-    per_sample_loss = training_components.criterion(outputs, is_win)
+    if label_smoothing > 0.0:
+        smoothed_targets = (
+            is_win * (1.0 - label_smoothing) + (1.0 - is_win) * label_smoothing
+        )
+    else:
+        smoothed_targets = is_win
 
+    per_sample_loss = training_components.criterion(outputs, smoothed_targets)
     decision_weights = torch.where(
         (is_my_decision == 1),
         float(decision_weight),
@@ -369,6 +376,7 @@ def train_step(
     train_loader: DotaBatchLoader,
     training_components: TrainingComponents,
     decision_weight: int,
+    label_smoothing: float = 0.0,
 ) -> float:
     model.train()
     total_loss: torch.Tensor | None = None
@@ -380,6 +388,7 @@ def train_step(
             batch_data,
             training_components,
             decision_weight,
+            label_smoothing,
         )
         total_loss = (
             batch_loss if total_loss is None else (total_loss + batch_loss)
@@ -428,6 +437,7 @@ class TrainingArguments:
     data: TrainingData
     epochs: int = 75
     early_stopping_patience: int = EARLY_STOPPING_PATIENCE
+    label_smoothing: float = 0.0
 
     @classmethod
     def from_trial_params(
@@ -451,4 +461,5 @@ class TrainingArguments:
                 factor=float(params["factor"]),
                 threshold=float(params["threshold"]),
             ),
+            label_smoothing=float(params["label_smoothing"]),
         )
