@@ -25,7 +25,9 @@ from dota_hero_picker.training_utils import (
 
 from .model_trainer import ModelTrainer
 from .neural_network import (
+    ActivationEnum,
     ClassifierParameters,
+    CrossAttentionParameters,
     DataDimensions,
     HeroFeatureParameters,
     MatchWinPredictor,
@@ -94,138 +96,102 @@ class LossMedianPruner:
         self.current_trial_best_loss = float("inf")
 
 
+def sample_hero_feature_parameters(trial: Trial) -> HeroFeatureParameters:
+    return HeroFeatureParameters(
+        hero_embed_dim=trial.suggest_categorical(
+            "hero_embed_dim",
+            [4, 8, 16, 32, 64, 128],
+        ),
+        stat_embed_dim=trial.suggest_categorical(
+            "stat_embed_dim",
+            [4, 8, 16, 32],
+        ),
+        patch_embed_dim=trial.suggest_categorical(
+            "patch_embed_dim",
+            [1, 2, 4, 8],
+        ),
+        num_fusion_layers=trial.suggest_int("num_fusion_layers", 1, 4),
+    )
+
+
+def sample_synergy_parameters(trial: Trial) -> SynergyParameters:
+    return SynergyParameters(
+        num_layers=trial.suggest_int("synergy_num_layers", 1, 4),
+        num_heads=trial.suggest_categorical(
+            "synergy_num_heads",
+            [1, 2, 4, 8],
+        ),
+        ffn_ratio=trial.suggest_categorical(
+            "synergy_ffn_ratio",
+            [1, 2, 4, 8],
+        ),
+    )
+
+
+def sample_cross_attention_parameters(
+    trial: Trial,
+) -> CrossAttentionParameters:
+    return CrossAttentionParameters(
+        num_layers=trial.suggest_int("cross_num_layers", 1, 3),
+        num_heads=trial.suggest_categorical(
+            "cross_num_heads",
+            [1, 2, 4, 8],
+        ),
+        ffn_ratio=trial.suggest_categorical(
+            "cross_ffn_ratio",
+            [1, 2, 4, 8],
+        ),
+        activation=ActivationEnum(
+            trial.suggest_categorical(
+                "cross_activation",
+                ["gelu", "relu", "silu"],
+            ),
+        ),
+    )
+
+
+def sample_transformer_parameters(trial: Trial) -> TransformerParameters:
+    return TransformerParameters(
+        num_layers=trial.suggest_int("num_layers", 1, 5),
+        num_heads=trial.suggest_categorical(
+            "num_heads",
+            [1, 2, 4, 8, 16],
+        ),
+        ffn_ratio=trial.suggest_categorical(
+            "ffn_ratio",
+            [1, 2, 4, 8],
+        ),
+    )
+
+
+def sample_classifier_parameters(trial: Trial) -> ClassifierParameters:
+    return ClassifierParameters(
+        hidden_dim=trial.suggest_categorical(
+            "hidden_dim",
+            [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048],
+        ),
+    )
+
+
 def sample_model_parameters(
     trial: Trial,
     data_manager: DataManager,
 ) -> ModelParameters:
-    d_model = trial.suggest_categorical(
-        "d_model",
-        [
-            4,
-            8,
-            16,
-            32,
-            64,
-            128,
-        ],
-    )
-    num_layers = trial.suggest_int("num_layers", 1, 5)
-    num_heads = trial.suggest_categorical(
-        "num_heads",
-        [
-            1,
-            2,
-            4,
-            8,
-            16,
-        ],
-    )
-    ffn_ratio = trial.suggest_categorical(
-        "ffn_ratio",
-        [
-            1,
-            2,
-            4,
-            8,
-        ],
-    )
-    synergy_num_layers = trial.suggest_int("synergy_num_layers", 1, 4)
-    synergy_num_heads = trial.suggest_categorical(
-        "synergy_num_heads",
-        [
-            1,
-            2,
-            4,
-            8,
-        ],
-    )
-    synergy_ffn_ratio = trial.suggest_categorical(
-        "synergy_ffn_ratio",
-        [
-            1,
-            2,
-            4,
-            8,
-        ],
-    )
-    hidden_dim = trial.suggest_categorical(
-        "hidden_dim",
-        [
-            2,
-            4,
-            8,
-            16,
-            32,
-            64,
-            128,
-            256,
-            512,
-            1024,
-            2048,
-        ],
-    )
-    dropout_rate = trial.suggest_float(
-        "dropout_rate",
-        0.00,
-        0.60,
-    )
-    hero_embed_dim = trial.suggest_categorical(
-        "hero_embed_dim",
-        [
-            4,
-            8,
-            16,
-            32,
-            64,
-            128,
-        ],
-    )
-    stat_embed_dim = trial.suggest_categorical(
-        "stat_embed_dim",
-        [
-            4,
-            8,
-            16,
-            32,
-        ],
-    )
-    patch_embed_dim = trial.suggest_categorical(
-        "patch_embed_dim",
-        [
-            1,
-            2,
-            4,
-            8,
-        ],
-    )
-    num_fusion_layers = trial.suggest_int("num_fusion_layers", 1, 4)
-
     return ModelParameters(
         data_dimensions=DataDimensions(
             num_heroes=data_manager.hero_data_manager.get_heroes_number(),
             num_patches=get_patches_number(),
         ),
-        hero_feature_parameters=HeroFeatureParameters(
-            hero_embed_dim=hero_embed_dim,
-            stat_embed_dim=stat_embed_dim,
-            patch_embed_dim=patch_embed_dim,
-            num_fusion_layers=num_fusion_layers,
+        hero_feature_parameters=sample_hero_feature_parameters(trial),
+        synergy_parameters=sample_synergy_parameters(trial),
+        cross_attention_parameters=sample_cross_attention_parameters(trial),
+        transformer_parameters=sample_transformer_parameters(trial),
+        classifier_parameters=sample_classifier_parameters(trial),
+        token_dim=trial.suggest_categorical(
+            "token_dim",
+            [4, 8, 16, 32, 64, 128],
         ),
-        d_model=d_model,
-        dropout_rate=dropout_rate,
-        synergy_parameters=SynergyParameters(
-            num_layers=synergy_num_layers,
-            num_heads=synergy_num_heads,
-            ffn_ratio=synergy_ffn_ratio,
-        ),
-        transformer_parameters=TransformerParameters(
-            num_layers=num_layers,
-            num_heads=num_heads,
-            ffn_ratio=ffn_ratio,
-        ),
-        classifier_parameters=ClassifierParameters(
-            hidden_dim=hidden_dim,
-        ),
+        dropout_rate=trial.suggest_float("dropout_rate", 0.00, 0.60),
     )
 
 
@@ -304,10 +270,13 @@ def create_objective(
         training_arguments = sample_training_arguments(trial, data_manager)
 
         if (
-            model_params.d_model % model_params.synergy_parameters.num_heads
+            model_params.token_dim % model_params.synergy_parameters.num_heads
             != 0
-            or model_params.d_model
+            or model_params.token_dim
             % model_params.transformer_parameters.num_heads
+            != 0
+            or model_params.token_dim
+            % model_params.cross_attention_parameters.num_heads
             != 0
         ):
             raise optuna.TrialPruned

@@ -44,6 +44,14 @@ class SynergyParameters:
 
 
 @dataclass
+class CrossAttentionParameters:
+    num_layers: int
+    num_heads: int
+    ffn_ratio: int
+    activation: ActivationEnum
+
+
+@dataclass
 class TransformerParameters:
     num_layers: int = 2
     num_heads: int = 4
@@ -71,9 +79,10 @@ class ModelParameters:
     data_dimensions: DataDimensions
     hero_feature_parameters: HeroFeatureParameters
     synergy_parameters: SynergyParameters
+    cross_attention_parameters: CrossAttentionParameters
     transformer_parameters: TransformerParameters
     classifier_parameters: ClassifierParameters
-    d_model: int
+    token_dim: int
     dropout_rate: float
 
     def to_dict(self) -> dict[str, Any]:
@@ -82,7 +91,7 @@ class ModelParameters:
             "hero_feature_parameters": {
                 "hero_embed_dim": self.hero_feature_parameters.hero_embed_dim,
                 "stat_embed_dim": self.hero_feature_parameters.stat_embed_dim,
-                "patch_embed_dim": self.hero_feature_parameters.patch_embed_dim,
+                "patch_embed_dim": self.hero_feature_parameters.patch_embed_dim,  # noqa: E501
                 "num_fusion_layers": (
                     self.hero_feature_parameters.num_fusion_layers
                 ),
@@ -94,6 +103,12 @@ class ModelParameters:
                 "ffn_ratio": self.synergy_parameters.ffn_ratio,
                 "activation": self.synergy_parameters.activation.value,
             },
+            "cross_attention_parameters": {
+                "num_layers": self.cross_attention_parameters.num_layers,
+                "num_heads": self.cross_attention_parameters.num_heads,
+                "ffn_ratio": self.cross_attention_parameters.ffn_ratio,
+                "activation": self.cross_attention_parameters.activation.value,
+            },
             "transformer_parameters": {
                 "num_layers": self.transformer_parameters.num_layers,
                 "num_heads": self.transformer_parameters.num_heads,
@@ -104,7 +119,7 @@ class ModelParameters:
                 "hidden_dim": self.classifier_parameters.hidden_dim,
                 "activation": self.classifier_parameters.activation.value,
             },
-            "d_model": self.d_model,
+            "token_dim": self.token_dim,
             "dropout_rate": self.dropout_rate,
         }
 
@@ -137,6 +152,14 @@ class ModelParameters:
                     data["synergy_parameters"]["activation"],
                 ),
             ),
+            cross_attention_parameters=CrossAttentionParameters(
+                num_layers=data["cross_attention_parameters"]["num_layers"],
+                num_heads=data["cross_attention_parameters"]["num_heads"],
+                ffn_ratio=data["cross_attention_parameters"]["ffn_ratio"],
+                activation=ActivationEnum(
+                    data["cross_attention_parameters"]["activation"],
+                ),
+            ),
             transformer_parameters=TransformerParameters(
                 num_layers=data["transformer_parameters"]["num_layers"],
                 num_heads=data["transformer_parameters"]["num_heads"],
@@ -151,7 +174,7 @@ class ModelParameters:
                     data["classifier_parameters"]["activation"],
                 ),
             ),
-            d_model=data["d_model"],
+            token_dim=data["token_dim"],
             dropout_rate=data["dropout_rate"],
         )
 
@@ -177,6 +200,12 @@ class ModelParameters:
                 num_heads=int(params["synergy_num_heads"]),
                 ffn_ratio=int(params["synergy_ffn_ratio"]),
             ),
+            cross_attention_parameters=CrossAttentionParameters(
+                num_layers=int(params["cross_num_layers"]),
+                num_heads=int(params["cross_num_heads"]),
+                ffn_ratio=int(params["cross_ffn_ratio"]),
+                activation=ActivationEnum(params["cross_activation"]),
+            ),
             transformer_parameters=TransformerParameters(
                 num_layers=int(params["num_layers"]),
                 num_heads=int(params["num_heads"]),
@@ -185,7 +214,7 @@ class ModelParameters:
             classifier_parameters=ClassifierParameters(
                 hidden_dim=int(params["hidden_dim"]),
             ),
-            d_model=int(params["d_model"]),
+            token_dim=int(params["token_dim"]),
             dropout_rate=float(params["dropout_rate"]),
         )
 
@@ -222,21 +251,21 @@ class HeroTokenEncoder(nn.Module):
             + feat_params.patch_embed_dim
         )
         fusion_layers: list[nn.Module] = [
-            nn.Linear(in_dim, params.d_model),
-            nn.LayerNorm(params.d_model),
+            nn.Linear(in_dim, params.token_dim),
+            nn.LayerNorm(params.token_dim),
             ACTIVATION_MODULES[feat_params.activation](),
             nn.Dropout(params.dropout_rate),
         ]
         for _ in range(feat_params.num_fusion_layers - 2):
             fusion_layers.extend(
                 [
-                    nn.Linear(params.d_model, params.d_model),
-                    nn.LayerNorm(params.d_model),
+                    nn.Linear(params.token_dim, params.token_dim),
+                    nn.LayerNorm(params.token_dim),
                     ACTIVATION_MODULES[feat_params.activation](),
                     nn.Dropout(params.dropout_rate),
                 ],
             )
-        fusion_layers.append(nn.Linear(params.d_model, params.d_model))
+        fusion_layers.append(nn.Linear(params.token_dim, params.token_dim))
         self.fusion = nn.Sequential(*fusion_layers)
 
     def forward(
@@ -296,10 +325,10 @@ class HeroEmbedding(nn.Module):
             torch.arange(9, dtype=torch.long),
         )
         self.token_encoder = HeroTokenEncoder(params)
-        self.team_embedding = nn.Embedding(2, params.d_model)
-        self.phase_embedding = nn.Embedding(4, params.d_model)
-        self.side_embedding = nn.Embedding(2, params.d_model)
-        self.norm = nn.LayerNorm(params.d_model)
+        self.team_embedding = nn.Embedding(2, params.token_dim)
+        self.phase_embedding = nn.Embedding(4, params.token_dim)
+        self.side_embedding = nn.Embedding(2, params.token_dim)
+        self.norm = nn.LayerNorm(params.token_dim)
         self.dropout = nn.Dropout(params.dropout_rate)
 
     def forward(
@@ -352,10 +381,10 @@ class DecisionEmbedding(nn.Module):
     def __init__(self, params: ModelParameters) -> None:
         super().__init__()
         self.decision_token = nn.Parameter(
-            torch.randn(1, 1, params.d_model) * 0.02,
+            torch.randn(1, 1, params.token_dim) * 0.02,
         )
-        self.stage_embedding = nn.Embedding(4, params.d_model)
-        self.norm = nn.LayerNorm(params.d_model)
+        self.stage_embedding = nn.Embedding(4, params.token_dim)
+        self.norm = nn.LayerNorm(params.token_dim)
         self.dropout = nn.Dropout(params.dropout_rate)
 
     def forward(
@@ -378,9 +407,9 @@ class TeamSynergyEncoder(nn.Module):
     def __init__(self, params: ModelParameters) -> None:
         super().__init__()
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=params.d_model,
+            d_model=params.token_dim,
             nhead=params.synergy_parameters.num_heads,
-            dim_feedforward=params.d_model
+            dim_feedforward=params.token_dim
             * params.synergy_parameters.ffn_ratio,
             dropout=params.dropout_rate,
             activation=ACTIVATION_MODULES[
@@ -437,6 +466,74 @@ class TeamSynergyEncoder(nn.Module):
         )
 
 
+class CrossTeamAttention(nn.Module):
+    def __init__(self, params: ModelParameters) -> None:
+        super().__init__()
+        cross_params = params.cross_attention_parameters
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=params.token_dim,
+            nhead=cross_params.num_heads,
+            dim_feedforward=params.token_dim * cross_params.ffn_ratio,
+            dropout=params.dropout_rate,
+            activation=ACTIVATION_MODULES[cross_params.activation](),
+            batch_first=True,
+            norm_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer,
+            num_layers=cross_params.num_layers,
+        )
+
+    def forward(
+        self,
+        hero_tokens: torch.Tensor,
+        hero_padding: torch.Tensor,
+    ) -> torch.Tensor:
+        ally_tokens = hero_tokens[:, ALLY_SLOT_INDICES]
+        enemy_tokens = hero_tokens[:, ENEMY_SLOT_INDICES]
+        ally_padding = hero_padding[:, ALLY_SLOT_INDICES]
+        enemy_padding = hero_padding[:, ENEMY_SLOT_INDICES]
+
+        enemy_has_picks = (~enemy_padding).any(dim=-1)
+
+        safe_enemy_mask = enemy_padding.clone()
+        safe_enemy_mask[~enemy_has_picks, 0] = False
+
+        # allies attend to enemies
+        updated_ally_tokens = self.decoder(
+            tgt=ally_tokens,
+            memory=enemy_tokens,
+            tgt_key_padding_mask=ally_padding,
+            memory_key_padding_mask=safe_enemy_mask,
+        )
+
+        # enemies attend to allies
+        updated_enemy_tokens = self.decoder(
+            tgt=enemy_tokens,
+            memory=ally_tokens,
+            tgt_key_padding_mask=safe_enemy_mask,
+            memory_key_padding_mask=ally_padding,
+        )
+
+        updated_ally_tokens = torch.where(
+            enemy_has_picks.view(-1, 1, 1),
+            updated_ally_tokens,
+            ally_tokens,
+        )
+        updated_enemy_tokens = torch.where(
+            enemy_has_picks.view(-1, 1, 1),
+            updated_enemy_tokens,
+            enemy_tokens,
+        )
+
+        result = hero_tokens.clone()
+        for out_idx, slot_idx in enumerate(ALLY_SLOT_INDICES):
+            result[:, slot_idx] = updated_ally_tokens[:, out_idx]
+        for out_idx, slot_idx in enumerate(ENEMY_SLOT_INDICES):
+            result[:, slot_idx] = updated_enemy_tokens[:, out_idx]
+        return result
+
+
 class MatchWinPredictor(nn.Module):
     def __init__(
         self,
@@ -447,11 +544,12 @@ class MatchWinPredictor(nn.Module):
         self.hero_embedding = HeroEmbedding(params, hero_features_matrix)
         self.decision_embedding = DecisionEmbedding(params)
         self.synergy_encoder = TeamSynergyEncoder(params)
+        self.cross_team_attention = CrossTeamAttention(params)
 
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=params.d_model,
+            d_model=params.token_dim,
             nhead=params.transformer_parameters.num_heads,
-            dim_feedforward=params.d_model
+            dim_feedforward=params.token_dim
             * params.transformer_parameters.ffn_ratio,
             dropout=params.dropout_rate,
             activation=ACTIVATION_MODULES[
@@ -472,7 +570,7 @@ class MatchWinPredictor(nn.Module):
         )
 
         classifier_input_dimension = (
-            params.d_model + params.hero_feature_parameters.patch_embed_dim
+            params.token_dim + params.hero_feature_parameters.patch_embed_dim
         )
         self.classifier = nn.Sequential(
             nn.LayerNorm(classifier_input_dimension),
@@ -498,6 +596,11 @@ class MatchWinPredictor(nn.Module):
         )
 
         updated_hero_tokens = self.synergy_encoder(hero_tokens, hero_padding)
+        updated_hero_tokens = self.cross_team_attention(
+            updated_hero_tokens,
+            hero_padding,
+        )
+
         decision_tokens = self.decision_embedding(
             match_context,
             draft_sequence.size(0),
@@ -528,4 +631,3 @@ class MatchWinPredictor(nn.Module):
         )
 
         return self.classifier(classifier_input).squeeze(-1)  # type: ignore[no-any-return]
-
