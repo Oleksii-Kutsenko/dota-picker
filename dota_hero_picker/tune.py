@@ -100,15 +100,20 @@ def sample_hero_feature_parameters(trial: Trial) -> HeroFeatureParameters:
     return HeroFeatureParameters(
         hero_embed_dim=trial.suggest_categorical(
             "hero_embed_dim",
-            [4, 8, 16, 32, 64, 128],
+            [8, 16, 32, 64, 128],
         ),
         stat_embed_dim=trial.suggest_categorical(
             "stat_embed_dim",
-            [4, 8, 16, 32],
+            [
+                2,
+                4,
+                8,
+                16,
+            ],
         ),
         patch_embed_dim=trial.suggest_categorical(
             "patch_embed_dim",
-            [1, 2, 4, 8],
+            [2, 4, 8, 16],
         ),
         num_fusion_layers=trial.suggest_int("num_fusion_layers", 1, 4),
     )
@@ -119,7 +124,7 @@ def sample_synergy_parameters(trial: Trial) -> SynergyParameters:
         num_layers=trial.suggest_int("synergy_num_layers", 1, 4),
         num_heads=trial.suggest_categorical(
             "synergy_num_heads",
-            [1, 2, 4, 8],
+            [2, 4, 8, 16],
         ),
         ffn_ratio=trial.suggest_categorical(
             "synergy_ffn_ratio",
@@ -135,31 +140,29 @@ def sample_cross_attention_parameters(
         num_layers=trial.suggest_int("cross_num_layers", 1, 3),
         num_heads=trial.suggest_categorical(
             "cross_num_heads",
-            [1, 2, 4, 8],
+            [2, 4, 8, 16],
         ),
         ffn_ratio=trial.suggest_categorical(
             "cross_ffn_ratio",
-            [1, 2, 4, 8],
-        ),
-        activation=ActivationEnum(
-            trial.suggest_categorical(
-                "cross_activation",
-                ["gelu", "relu", "silu"],
-            ),
+            [2, 4, 8, 16],
         ),
     )
 
 
 def sample_transformer_parameters(trial: Trial) -> TransformerParameters:
     return TransformerParameters(
-        num_layers=trial.suggest_int("num_layers", 1, 5),
+        num_layers=trial.suggest_int("num_layers", 1, 4),
         num_heads=trial.suggest_categorical(
             "num_heads",
-            [1, 2, 4, 8, 16],
+            [
+                2,
+                4,
+                8,
+            ],
         ),
         ffn_ratio=trial.suggest_categorical(
             "ffn_ratio",
-            [1, 2, 4, 8],
+            [2, 4, 8, 16],
         ),
     )
 
@@ -168,7 +171,18 @@ def sample_classifier_parameters(trial: Trial) -> ClassifierParameters:
     return ClassifierParameters(
         hidden_dim=trial.suggest_categorical(
             "hidden_dim",
-            [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048],
+            [
+                4,
+                8,
+                16,
+                32,
+                64,
+                128,
+                256,
+                512,
+                1024,
+                2048,
+            ],
         ),
     )
 
@@ -189,9 +203,15 @@ def sample_model_parameters(
         classifier_parameters=sample_classifier_parameters(trial),
         token_dim=trial.suggest_categorical(
             "token_dim",
-            [4, 8, 16, 32, 64, 128],
+            [
+                4,
+                8,
+                16,
+                32,
+                64,
+            ],
         ),
-        dropout_rate=trial.suggest_float("dropout_rate", 0.00, 0.60),
+        dropout_rate=trial.suggest_float("dropout_rate", 0.00, 0.50),
     )
 
 
@@ -207,39 +227,38 @@ def sample_training_arguments(
             128,
             256,
             512,
-            1024,
         ],
     )
-    lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+    lr = trial.suggest_float("lr", 1e-6, 1e-2, log=True)
     weight_decay = trial.suggest_float(
         "weight_decay",
         1e-12,
-        1e-7,
+        1e-9,
         log=True,
     )
     decision_weight = trial.suggest_int(
         "decision_weight",
-        10,
-        23,
+        12,
+        21,
     )
 
     scheduler_patience = trial.suggest_int(
         "scheduler_patience",
-        5,
+        6,
         12,
     )
     factor = trial.suggest_float(
         "factor",
-        0.25,
-        0.70,
+        0.30,
+        0.65,
     )
     threshold = trial.suggest_float(
         "threshold",
-        1e-12,
-        1e-7,
+        1e-14,
+        1e-9,
         log=True,
     )
-    label_smoothing = trial.suggest_float("label_smoothing", 0.0, 0.2)
+    label_smoothing = trial.suggest_float("label_smoothing", 0.0, 0.10)
 
     return TrainingArguments(
         data=TrainingData(
