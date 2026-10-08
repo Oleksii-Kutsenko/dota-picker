@@ -261,6 +261,8 @@ Decision: Approved
 
 
 Add OpenDota pairwise advantage matrix as an additive (probably) bias to attention logits (Score = QK^T / sqrt(d) + bias).
+Before:
+
 
 
 Put stage context not in decision token but in classifier

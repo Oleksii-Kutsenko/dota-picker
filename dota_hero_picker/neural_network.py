@@ -48,7 +48,7 @@ class CrossAttentionParameters:
     num_layers: int
     num_heads: int
     ffn_ratio: int
-    activation: ActivationEnum
+    activation: ActivationEnum = ActivationEnum.GELU
 
 
 @dataclass
@@ -204,7 +204,6 @@ class ModelParameters:
                 num_layers=int(params["cross_num_layers"]),
                 num_heads=int(params["cross_num_heads"]),
                 ffn_ratio=int(params["cross_ffn_ratio"]),
-                activation=ActivationEnum(params["cross_activation"]),
             ),
             transformer_parameters=TransformerParameters(
                 num_layers=int(params["num_layers"]),
